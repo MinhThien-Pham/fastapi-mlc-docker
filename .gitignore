@@ -9,3 +9,4 @@ ENV/
 .idea/
 .vscode/
 .DS_Store
+mlc-cli/
