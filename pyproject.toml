@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+# Default: just run tests — no --cov flag.
+# Coverage requires a native Linux filesystem for its SQLite database.
+# Run with coverage from WSL or inside the container only:
+#   pytest --cov=app --cov-report=term-missing
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true

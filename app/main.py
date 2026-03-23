@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 from pathlib import Path
 from typing import AsyncIterator, Literal
@@ -10,6 +9,8 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.helpers import build_mlc_cli_command, detect_known_failure, run_tool_check
+
 app = FastAPI(title="FastAPI MLC-CLI")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ MLC_CLI_PATH = Path("/workspace/mlc-cli")
 MLC_CLI_URL = "https://github.com/ballinyouup/mlc-cli.git"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Internal subprocess helpers ───────────────────────────────────────────────
 
 def run_command(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True)
@@ -28,7 +29,12 @@ def run_git(args: list[str], cwd: Path | None = None, check: bool = True) -> sub
 
 
 async def stream_subprocess(command: list[str], cwd: Path | None = None) -> AsyncIterator[str]:
-    """Yield stdout/stderr lines from a subprocess as SSE-formatted strings."""
+    """Yield stdout/stderr lines from a subprocess as SSE-formatted strings.
+
+    Known build failures (e.g. cutlass / flash-attn) are detected line-by-line.
+    When a match is found a single ``[HINT]`` line is emitted immediately after
+    the offending line so the caller knows exactly how to retry.
+    """
     proc = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
@@ -36,9 +42,17 @@ async def stream_subprocess(command: list[str], cwd: Path | None = None) -> Asyn
         cwd=cwd,
     )
     assert proc.stdout is not None
+
+    hint_emitted = False  # emit at most one hint per build run
     async for raw_line in proc.stdout:
         line = raw_line.decode(errors="replace").rstrip()
         yield f"data: {line}\n\n"
+
+        if not hint_emitted:
+            hint = detect_known_failure(line)
+            if hint:
+                yield f"data: [HINT] {hint}\n\n"
+                hint_emitted = True
 
     await proc.wait()
     if proc.returncode != 0:
@@ -64,7 +78,7 @@ class BuildRequest(BaseModel):
     force_clone: Literal["y", "n"] = "n"
 
 
-# ── Existing endpoints ────────────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -78,27 +92,66 @@ def health_check():
 
 @app.get("/setup-check")
 def setup_check():
-    if not MLC_CLI_PATH.exists():
-        return {
-            "status": "error",
-            "message": "mlc-cli repo not found",
-            "repo_exists": False,
-            "path": str(MLC_CLI_PATH),
-        }
+    """Inspect the environment: mlc-cli repo, Go, Conda, nvidia-smi, and nvcc.
 
-    git_result = run_command(["git", "remote", "get-url", "origin"], MLC_CLI_PATH)
-    go_result = run_command(["go", "version"], MLC_CLI_PATH)
-    conda_result = run_command(["conda", "--version"])
+    Returns a structured ``checks`` dict (one entry per tool) plus a top-level
+    ``status`` ("ok" | "warning" | "error") and a ``warnings`` list.
+
+    The ``repo_exists`` field is kept for backward compatibility with
+    ``test_pipeline.py``.
+    """
+    repo_exists = MLC_CLI_PATH.exists()
+
+    # ── Per-tool checks ───────────────────────────────────────────────────────
+    checks: dict = {
+        "repo": {
+            "available": repo_exists,
+            "path": str(MLC_CLI_PATH),
+            "output": (
+                ""
+                if repo_exists
+                else "mlc-cli repo not found — call POST /ensure-repo-exists first"
+            ),
+        },
+        "go":         run_tool_check(["go", "version"]),
+        "conda":      run_tool_check(["conda", "--version"]),
+        "nvidia_smi": run_tool_check(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]),
+        "nvcc":       run_tool_check(["nvcc", "--version"]),
+    }
+
+    # Enrich repo entry with remote URL when the repo is present
+    if repo_exists:
+        git_check = run_tool_check(["git", "remote", "get-url", "origin"])
+        checks["repo"]["origin"] = git_check.get("output", "")
+
+    # ── Derive overall status ─────────────────────────────────────────────────
+    # "critical" tools — without these the build cannot start at all
+    critical_ok = checks["go"]["available"] and checks["conda"]["available"]
+    gpu_ok = checks["nvidia_smi"]["available"] and checks["nvcc"]["available"]
+
+    if repo_exists and critical_ok:
+        overall = "ok"
+    elif critical_ok:
+        # repo missing is a warning, not a hard error (it can be cloned on demand)
+        overall = "warning"
+    else:
+        overall = "error"
+
+    warnings: list[str] = []
+    if not gpu_ok:
+        warnings.append(
+            "nvidia-smi or nvcc is unavailable. "
+            "GPU-dependent build steps will fail. "
+            "Make sure CUDA drivers are installed and the GPU is visible to the container."
+        )
 
     return {
-        "status": "ok",
-        "repo_exists": True,
-        "path": str(MLC_CLI_PATH),
-        "origin": git_result.stdout.strip(),
-        "go_version": go_result.stdout.strip(),
-        "conda_version": conda_result.stdout.strip(),
-        "git_returncode": git_result.returncode,
-        "go_returncode": go_result.returncode,
+        # kept for backward compat with test_pipeline.py
+        "repo_exists": repo_exists,
+        # new structured output
+        "status":   overall,
+        "checks":   checks,
+        "warnings": warnings,
     }
 
 
@@ -162,43 +215,33 @@ def repo_status():
 
 @app.post("/build")
 async def build(req: BuildRequest):
-    """
-    Trigger `mlc-cli build` non-interactively and stream stdout/stderr back
-    as Server-Sent Events (SSE).
+    """Trigger ``mlc-cli build`` non-interactively and stream stdout/stderr as SSE.
 
-    The client should listen with:
-        curl -N -X POST http://localhost:8000/build -H 'Content-Type: application/json' \\
+    Known failures (cutlass / flash-attn) are automatically detected and
+    followed by a ``[HINT]`` line that tells you exactly how to retry.
+
+    Example — stream a wheel-only install::
+
+        curl -N -X POST http://localhost:8000/build \\
+             -H 'Content-Type: application/json' \\
              -d '{"action":"install-wheels"}'
+
+    Each SSE line is prefixed with ``data: ``.
+    The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
+    on failure.
     """
     if not MLC_CLI_PATH.exists():
         async def error_stream():
-            yield f"data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    # Build CLI arg list from request body using 'go run . build ...'
-    # mlc-cli build --os linux --action <action> --cuda y --cuda-arch 86 ...
-    cmd = [
-        "go", "run", ".", "build",
-        "--os", "linux",
-        "--action", req.action,
-        "--tvm-source", req.tvm_source,
-        "--cuda", req.cuda,
-        "--cuda-arch", req.cuda_arch,
-        "--cutlass", req.cutlass,
-        "--cublas", req.cublas,
-        "--flash-infer", req.flash_infer,
-        "--rocm", req.rocm,
-        "--vulkan", req.vulkan,
-        "--opencl", req.opencl,
-        "--build-wheels", req.build_wheels,
-        "--force-clone", req.force_clone,
-    ]
+    cmd = build_mlc_cli_command(req)
 
     return StreamingResponse(
         stream_subprocess(cmd, cwd=MLC_CLI_PATH),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable nginx buffering if behind a proxy
+            "X-Accel-Buffering": "no",  # prevent nginx from buffering SSE
         },
     )

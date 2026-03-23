@@ -1,3 +1,5 @@
 fastapi[standard]
 uvicorn[standard]
 httpx
+pytest
+pytest-cov
