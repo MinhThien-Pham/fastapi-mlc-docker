@@ -1,12 +1,31 @@
+# Python bytecode
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Environments
 .env
 .venv
 env/
 venv/
 ENV/
+
+# IDEs
 .idea/
 .vscode/
 .DS_Store
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Build / packaging
+*.egg-info/
+dist/
+build/
+
+# Project-specific
 mlc-cli/
