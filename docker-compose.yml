@@ -6,6 +6,13 @@ services:
     volumes:
       - .:/app
       - mlc_workspace:/workspace
+    environment:
+      # Override any of these with: docker compose run -e VAR=value web
+      - BUILD_ACTION=${BUILD_ACTION:-full}
+      - CUDA_ARCH=${CUDA_ARCH:-86}
+      - TVM_SOURCE=${TVM_SOURCE:-bundled}
+      - BUILD_WHEELS=${BUILD_WHEELS:-y}
+      - MLC_DEVICE=${MLC_DEVICE:-cuda}
     deploy:
       resources:
         reservations:
