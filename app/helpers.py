@@ -152,3 +152,22 @@ def build_convert_command(req: Any) -> list[str]:
     if req.output:
         cmd.extend(["--output", req.output])
     return cmd
+
+
+# ── Compile command construction ──────────────────────────────────────────────
+
+def build_compile_command(req: Any) -> list[str]:
+    """Translate a *CompileRequest* into the ``go run . compile`` argument list.
+
+    This wraps the mlc-cli ``compile`` sub-command.
+    """
+    cmd = [
+        "go", "run", ".", "compile",
+        "--os",     "linux",
+        "--model",  req.model,
+        "--quant",  req.quant,
+        "--device", req.device,
+    ]
+    if req.output:
+        cmd.extend(["--output", req.output])
+    return cmd

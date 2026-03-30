@@ -48,6 +48,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | ------ | ---------- | ----------------------------------------------------------------------------- |
 | `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
 | `POST` | `/convert` | Convert/quantize raw model weights to MLC format; stream output as SSE        |
+| `POST` | `/compile` | Compile model library; stream output as SSE                                   |
 
 ### `GET /setup-check`
 
@@ -178,6 +179,44 @@ curl -N -X POST http://localhost:8000/convert \
 
 Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
 
+### Compile
+
+#### `POST /compile`
+
+Compiles a model library and **streams stdout/stderr as SSE**.
+
+Internally this calls the mlc-cli `compile` sub-command.
+
+**Pipeline position:** Run `/compile` *after* `/convert` and *before* `/run`.
+
+**Request body (`model` is required; all other fields are optional):**
+
+```json
+{
+  "model": "models/Llama-3-8B",
+  "quant": "q4f16_1",
+  "device": "cuda",
+  "output": ""
+}
+```
+
+| Field    | Type   | Default   | Notes                                                              |
+| -------- | ------ | --------- | ------------------------------------------------------------------ |
+| `model`  | string | *(req)*   | Path to a local model dir (e.g. `models/Llama-3-8B`)               |
+| `quant`  | string | `q4f16_1` | Quantization: `q4f16_1`, `q0f32`, etc.                             |
+| `device` | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`         |
+| `output` | string | `""`      | Output directory or file path. If empty, uses default              |
+
+**Example — compile a Llama-3 8B model:**
+
+```bash
+curl -N -X POST http://localhost:8000/compile \
+     -H 'Content-Type: application/json' \
+     -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+```
+
+Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+
 ## 🗂️ Project Structure
 
 ```
@@ -190,7 +229,8 @@ Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on 
 │   ├── test_health.py   # /health and / endpoint tests
 │   ├── test_setup_check.py  # /setup-check tests (all mocked)
 │   ├── test_helpers.py  # Unit tests for app/helpers.py
-│   └── test_convert.py  # build_convert_command helper + POST /convert route tests
+│   ├── test_convert.py  # build_convert_command helper + POST /convert route tests
+│   └── test_compile.py  # build_compile_command helper + POST /compile route tests
 ├── .github/
 │   └── workflows/
 │       └── ci.yml       # GitHub Actions CI (push + PR)

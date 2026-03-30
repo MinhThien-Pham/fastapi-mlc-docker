@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.helpers import build_convert_command, build_mlc_cli_command, detect_known_failure, run_tool_check
+from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, detect_known_failure, run_tool_check
 
 app = FastAPI(title="FastAPI MLC-CLI")
 
@@ -111,6 +111,14 @@ class ConvertRequest(BaseModel):
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
     conv_template: CONV_TEMPLATE_OPTIONS = "llama-3"  # type: ignore[valid-type]
     # Optional: if empty, mlc-cli derives a default from model name + quant
+    output: str = ""
+
+
+class CompileRequest(BaseModel):
+    """Request body for POST /compile."""
+    model: str
+    quant: QUANT_OPTIONS = "q4f16_1"  # type: ignore[valid-type]
+    device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
     output: str = ""
 
 
@@ -314,6 +322,42 @@ async def convert(req: ConvertRequest):
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     cmd = build_convert_command(req)
+
+    return StreamingResponse(
+        stream_subprocess(cmd, cwd=MLC_CLI_PATH),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Compile endpoint ────────────────────────────────────────────────────────────────
+
+@app.post("/compile")
+async def compile_model(req: CompileRequest):
+    """Compile model library and stream output as SSE.
+
+    Internally this calls the mlc-cli ``compile`` sub-command.
+    The ``model`` field is required.  All other fields have sensible defaults.
+
+    Example — compile a locally-cloned Llama-3 8B model::
+
+        curl -N -X POST http://localhost:8000/compile \\
+             -H 'Content-Type: application/json' \\
+             -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+
+    Each SSE line is prefixed with ``data: ``.
+    The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
+    on failure.
+    """
+    if not MLC_CLI_PATH.exists():
+        async def error_stream():
+            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    cmd = build_compile_command(req)
 
     return StreamingResponse(
         stream_subprocess(cmd, cwd=MLC_CLI_PATH),
