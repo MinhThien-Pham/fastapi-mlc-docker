@@ -5,6 +5,13 @@ Pure helper functions extracted from main.py for testability.
 
 All functions here are side-effect-free or have their side effects
 (subprocess calls) well-contained so they can be mocked easily in tests.
+
+Functions
+---------
+detect_known_failure   – detect known build-log failure signatures
+run_tool_check         – thin wrapper around subprocess for tool availability
+build_mlc_cli_command  – construct ``go run . build`` argv list
+build_convert_command  – construct ``go run . quantize`` argv list
 """
 
 from __future__ import annotations
@@ -112,3 +119,36 @@ def build_mlc_cli_command(req: Any) -> list[str]:
         "--build-wheels", req.build_wheels,
         "--force-clone", req.force_clone,
     ]
+
+
+
+# ── Convert (quantize) command construction ───────────────────────────────────
+
+def build_convert_command(req: Any) -> list[str]:
+    """Translate a *ConvertRequest* into the ``go run . quantize`` argument list.
+
+    This wraps the mlc-cli ``quantize`` sub-command which runs two steps:
+
+    1. ``mlc_llm convert_weight`` — convert raw Hugging Face weights to MLC
+       format and apply quantization.
+    2. ``mlc_llm gen_config``     — write the runtime config alongside the
+       converted weights.
+
+    Keeping this logic here (rather than inline in the route handler) makes
+    it trivial to unit-test without spinning up a full FastAPI app.
+
+    Assumption: ``output`` defaults to ``dist/<model_basename>-<quant>-MLC``
+    when not supplied — this mirrors what ``mlc-cli quantize`` does
+    internally when ``--output`` is omitted.
+    """
+    cmd = [
+        "go", "run", ".", "quantize",
+        "--os",     "linux",
+        "--model",  req.model,
+        "--quant",  req.quant,
+        "--device", req.device,
+        "--template", req.conv_template,
+    ]
+    if req.output:
+        cmd.extend(["--output", req.output])
+    return cmd

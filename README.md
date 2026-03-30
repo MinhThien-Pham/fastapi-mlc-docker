@@ -42,6 +42,13 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes |
 | `POST` | `/ensure-repo-exists` | Clone `mlc-cli` repo into `/workspace/mlc-cli` if absent    |
 
+### Pipeline
+
+| Method | Path       | Description                                                                   |
+| ------ | ---------- | ----------------------------------------------------------------------------- |
+| `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
+| `POST` | `/convert` | Convert/quantize raw model weights to MLC format; stream output as SSE        |
+
 ### `GET /setup-check`
 
 Checks five things and returns a structured result:
@@ -128,6 +135,49 @@ data: [HINT]        -d '{"action":"full","cutlass":"n","flash_infer":"n"}'
 
 > **Note:** `cutlass` and `flash_infer` already default to `"n"`. This hint is mainly useful if you explicitly enabled them and hit a build error.
 
+### Convert
+
+#### `POST /convert`
+
+Quantizes (converts) raw model weights to MLC format and **streams stdout/stderr as SSE**.
+
+Internally this calls the mlc-cli `quantize` sub-command, which runs two steps in sequence:
+
+1. `mlc_llm convert_weight` — convert Hugging Face weights to MLC format with the selected quantization.
+2. `mlc_llm gen_config`     — write the runtime config alongside the converted weights.
+
+**Pipeline position:** Run `/convert` *after* `/build` (which installs the `mlc-llm` Python package) and *before* `/run`.
+
+**Request body (`model` is required; all other fields are optional):**
+
+```json
+{
+  "model": "models/Llama-3-8B",
+  "quant": "q4f16_1",
+  "device": "cuda",
+  "conv_template": "llama-3",
+  "output": ""
+}
+```
+
+| Field           | Type   | Default    | Notes                                                                                        |
+| --------------- | ------ | ---------- | -------------------------------------------------------------------------------------------- |
+| `model`         | string | *(required)* | Path to a local model dir (e.g. `models/Llama-3-8B`) or a Hugging Face hub identifier     |
+| `quant`         | string | `q4f16_1`  | Quantization: `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`  |
+| `device`        | string | `cuda`     | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                  |
+| `conv_template` | string | `llama-3`  | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`   |
+| `output`        | string | `""`       | Output directory. If empty, mlc-cli uses `dist/<model_basename>-<quant>-MLC`               |
+
+**Example — convert a Llama-3 8B model:**
+
+```bash
+curl -N -X POST http://localhost:8000/convert \
+     -H 'Content-Type: application/json' \
+     -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+```
+
+Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+
 ## 🗂️ Project Structure
 
 ```
@@ -139,7 +189,8 @@ data: [HINT]        -d '{"action":"full","cutlass":"n","flash_infer":"n"}'
 │   ├── conftest.py      # Shared pytest fixtures
 │   ├── test_health.py   # /health and / endpoint tests
 │   ├── test_setup_check.py  # /setup-check tests (all mocked)
-│   └── test_helpers.py  # Unit tests for app/helpers.py
+│   ├── test_helpers.py  # Unit tests for app/helpers.py
+│   └── test_convert.py  # build_convert_command helper + POST /convert route tests
 ├── .github/
 │   └── workflows/
 │       └── ci.yml       # GitHub Actions CI (push + PR)

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.helpers import build_mlc_cli_command, detect_known_failure, run_tool_check
+from app.helpers import build_convert_command, build_mlc_cli_command, detect_known_failure, run_tool_check
 
 app = FastAPI(title="FastAPI MLC-CLI")
 
@@ -76,6 +76,42 @@ class BuildRequest(BaseModel):
     opencl: Literal["y", "n"] = "n"
     build_wheels: Literal["y", "n"] = "y"
     force_clone: Literal["y", "n"] = "n"
+
+QUANT_OPTIONS = Literal[
+    "q4f16_1",
+    "q4f16_ft",
+    "q4f32_1",
+    "q3f16_1",
+    "q8f16_1",
+    "q0f16",
+    "q0f32",
+]
+
+CONV_TEMPLATE_OPTIONS = Literal[
+    "llama-3",
+    "chatml",
+    "mistral_default",
+    "phi-2",
+    "gemma",
+    "qwen2",
+]
+
+
+class ConvertRequest(BaseModel):
+    """Request body for POST /convert.
+
+    ``model`` is required — it must be a path to a Hugging Face model directory
+    (e.g. ``models/Llama-3-8B``) or a Hugging Face hub identifier.
+
+    The mlc-cli ``quantize`` sub-command drives the conversion: it first calls
+    ``mlc_llm convert_weight`` and then ``mlc_llm gen_config``.
+    """
+    model: str
+    quant: QUANT_OPTIONS = "q4f16_1"  # type: ignore[valid-type]
+    device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
+    conv_template: CONV_TEMPLATE_OPTIONS = "llama-3"  # type: ignore[valid-type]
+    # Optional: if empty, mlc-cli derives a default from model name + quant
+    output: str = ""
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -243,5 +279,47 @@ async def build(req: BuildRequest):
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",  # prevent nginx from buffering SSE
+        },
+    )
+
+
+# ── Convert endpoint ────────────────────────────────────────────────────────────────
+
+@app.post("/convert")
+async def convert(req: ConvertRequest):
+    """Quantize (convert) raw model weights to MLC format and stream output as SSE.
+
+    Internally this calls the mlc-cli ``quantize`` sub-command which runs:
+
+    1. ``mlc_llm convert_weight`` — convert weights to MLC format.
+    2. ``mlc_llm gen_config``     — generate the runtime config file.
+
+    The ``model`` field is required.  All other fields have sensible defaults.
+    If ``output`` is omitted, mlc-cli derives a default path of the form
+    ``dist/<model_basename>-<quant>-MLC``.
+
+    Example — convert a locally-cloned Llama-3 8B model::
+
+        curl -N -X POST http://localhost:8000/convert \\
+             -H 'Content-Type: application/json' \\
+             -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+
+    Each SSE line is prefixed with ``data: ``.
+    The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
+    on failure.
+    """
+    if not MLC_CLI_PATH.exists():
+        async def error_stream():
+            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    cmd = build_convert_command(req)
+
+    return StreamingResponse(
+        stream_subprocess(cmd, cwd=MLC_CLI_PATH),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
         },
     )
