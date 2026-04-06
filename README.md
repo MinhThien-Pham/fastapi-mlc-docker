@@ -50,7 +50,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
 | `POST` | `/convert` | Convert/quantize raw model weights to MLC format; stream output as SSE        |
 | `POST` | `/compile` | Compile model library; stream output as SSE                                   |
-| `POST` | `/run`     | Run a single prompt against a model; stream output as SSE                     |
+| `POST` | `/run`     | Load-test a model by initializing the interactive REPL; stream output as SSE  |
 
 ### `GET /setup-check`
 
