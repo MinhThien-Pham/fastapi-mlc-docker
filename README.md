@@ -41,6 +41,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | `GET`  | `/setup-check`        | Inspect repo, Go, Conda, nvidia-smi, and nvcc               |
 | `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes |
 | `POST` | `/ensure-repo-exists` | Clone `mlc-cli` repo into `/workspace/mlc-cli` if absent    |
+| `GET`  | `/artifacts`          | List locally built wheels, converted models, and compiled libs|
 
 ### Pipeline
 
@@ -85,6 +86,58 @@ Checks five things and returns a structured result:
 - `"error"` — Go or Conda is missing; the build cannot proceed.
 
 GPU tools (`nvidia-smi`, `nvcc`) that are unavailable are listed in `warnings` but do not change `status` to `"error"` on their own.
+
+### `GET /artifacts`
+
+A convenience endpoint to view the outputs of the build, convert, and compile steps without needing to manually inspect the container filesystem.
+
+This endpoint scans the local `mlc-cli` workspace and returns a structured JSON list of:
+- **Built wheels** (`.whl`)
+- **Converted models** (directories containing `mlc-chat-config.json`)
+- **Compiled model libraries** (`.so`, `.dylib`, `.dll`)
+
+**Example Response:**
+
+```json
+{
+  "status": "ok",
+  "root_paths_searched": [
+    "/workspace/mlc-cli"
+  ],
+  "counts": {
+    "build": 1,
+    "convert": 1,
+    "compile": 1,
+    "total": 3
+  },
+  "artifacts": [
+    {
+      "type": "wheel",
+      "name": "mlc_llm-0.1.0-cp310-cp310-linux_x86_64.whl",
+      "path": "build/mlc_llm-0.1.0-cp310-cp310-linux_x86_64.whl",
+      "source_step": "build",
+      "size_bytes": 1420583,
+      "modified_time": 1714589212.0
+    },
+    {
+      "type": "model_dir",
+      "name": "Llama-3-8B-q4f16_1-MLC",
+      "path": "dist/Llama-3-8B-q4f16_1-MLC",
+      "source_step": "convert",
+      "size_bytes": 4512938491,
+      "modified_time": 1714589500.0
+    },
+    {
+      "type": "compiled_lib",
+      "name": "Llama-3-8B-q4f16_1-cuda.so",
+      "path": "dist/Llama-3-8B-q4f16_1-MLC/Llama-3-8B-q4f16_1-cuda.so",
+      "source_step": "compile",
+      "size_bytes": 84592,
+      "modified_time": 1714589600.0
+    }
+  ]
+}
+```
 
 ### Build
 

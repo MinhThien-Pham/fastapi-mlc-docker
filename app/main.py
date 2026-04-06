@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, detect_known_failure, run_tool_check
+from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, detect_known_failure, discover_artifacts, run_tool_check
 
 app = FastAPI(title="FastAPI MLC-CLI")
 
@@ -367,3 +367,30 @@ async def compile_model(req: CompileRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── Artifacts endpoint ────────────────────────────────────────────────────────
+
+@app.get("/artifacts")
+def get_artifacts():
+    """Discover outputs from build, convert, and compile steps.
+
+    Returns a structured JSON response of discovered local artifacts.
+    Safe to call at any time. If the mlc-cli repository is missing or
+    empty, it will return an empty list of artifacts.
+    """
+    artifacts = discover_artifacts(MLC_CLI_PATH)
+    
+    counts = {
+        "build": sum(1 for a in artifacts if a["source_step"] == "build"),
+        "convert": sum(1 for a in artifacts if a["source_step"] == "convert"),
+        "compile": sum(1 for a in artifacts if a["source_step"] == "compile"),
+        "total": len(artifacts),
+    }
+
+    return {
+        "status": "ok",
+        "root_paths_searched": [str(MLC_CLI_PATH)],
+        "counts": counts,
+        "artifacts": artifacts
+    }
