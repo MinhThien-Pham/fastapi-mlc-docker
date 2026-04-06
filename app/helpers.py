@@ -174,6 +174,29 @@ def build_compile_command(req: Any) -> list[str]:
     return cmd
 
 
+# ── Run command construction ──────────────────────────────────────────────────
+
+def build_run_command(req: Any) -> list[str]:
+    """Translate a *RunRequest* into the ``go run . run`` argument list.
+
+    This wraps the mlc-cli ``run`` sub-command. Note that upstream is interactive
+    and does not support a ``--prompt`` flag. When run without stdin, it acts as
+    a load-test.
+    """
+    cmd = [
+        "go", "run", ".", "run",
+        "--os", "linux",
+        "--model-name", req.model_name,
+        "--device", req.device,
+        "--profile", req.profile,
+    ]
+    if req.model_url:
+        cmd.extend(["--model-url", req.model_url])
+    if req.model_lib:
+        cmd.extend(["--model-lib", req.model_lib])
+    return cmd
+
+
 # ── Artifact discovery ────────────────────────────────────────────────────────
 
 def discover_artifacts(base_path: Path) -> list[dict]:

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, detect_known_failure, discover_artifacts, run_tool_check
+from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, build_run_command, detect_known_failure, discover_artifacts, run_tool_check
 
 app = FastAPI(title="FastAPI MLC-CLI")
 
@@ -120,6 +120,15 @@ class CompileRequest(BaseModel):
     quant: QUANT_OPTIONS = "q4f16_1"  # type: ignore[valid-type]
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
     output: str = ""
+
+
+class RunRequest(BaseModel):
+    """Request body for POST /run."""
+    model_name: str
+    model_url: str = ""
+    device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
+    profile: Literal["really-low", "low", "default", "high"] = "default"
+    model_lib: str = ""
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -358,6 +367,50 @@ async def compile_model(req: CompileRequest):
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     cmd = build_compile_command(req)
+
+    return StreamingResponse(
+        stream_subprocess(cmd, cwd=MLC_CLI_PATH),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Run endpoint ──────────────────────────────────────────────────────────────────
+
+@app.post("/run")
+async def run_model(req: RunRequest):
+    """Load-test a model by initializing the interactive REPL.
+
+    Internally this calls the mlc-cli ``run`` sub-command.
+
+    **LIMITATION**: The upstream ``mlc-cli run`` command is interactive by default
+    and does NOT support a non-interactive single-shot ``--prompt`` flag. When
+    called via this API endpoint, no standard input is provided. The subprocess
+    will initialize the model, print its ready state, and immediately exit upon
+    encountering EOF. This effectively serves as a "load test" to verify model
+    and compiled library compatibility.
+
+    The ``model_name`` field is required.
+
+    Example — load test a model::
+
+        curl -N -X POST http://localhost:8000/run \\
+             -H 'Content-Type: application/json' \\
+             -d '{"model_name": "Llama-3-8B", "device": "cuda", "profile": "default"}'
+
+    Each SSE line is prefixed with ``data: ``.
+    The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
+    on failure.
+    """
+    if not MLC_CLI_PATH.exists():
+        async def error_stream():
+            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    cmd = build_run_command(req)
 
     return StreamingResponse(
         stream_subprocess(cmd, cwd=MLC_CLI_PATH),

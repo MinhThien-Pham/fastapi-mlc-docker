@@ -50,6 +50,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
 | `POST` | `/convert` | Convert/quantize raw model weights to MLC format; stream output as SSE        |
 | `POST` | `/compile` | Compile model library; stream output as SSE                                   |
+| `POST` | `/run`     | Run a single prompt against a model; stream output as SSE                     |
 
 ### `GET /setup-check`
 
@@ -270,6 +271,48 @@ curl -N -X POST http://localhost:8000/compile \
 
 Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
 
+### Run
+
+#### `POST /run`
+
+Load-tests a model by initializing the interactive REPL and **streams stdout/stderr as SSE**.
+
+Internally this calls the mlc-cli `run` sub-command.
+
+**LIMITATION**: The upstream `mlc-cli run` command is interactive by default and does NOT support a non-interactive single-shot `--prompt` flag. When called via this API endpoint, no standard input is provided. The subprocess will initialize the model, print its ready state, and immediately exit upon encountering EOF. This effectively serves as a "load test" to verify model and compiled library compatibility.
+
+**Pipeline position:** Run `/run` *after* `/compile` (and `/convert`). 
+
+**Request body (`model_name` is required; all other fields are optional):**
+
+```json
+{
+  "model_name": "Llama-3-8B",
+  "model_url": "",
+  "device": "cuda",
+  "profile": "default",
+  "model_lib": ""
+}
+```
+
+| Field        | Type   | Default   | Notes                                                               |
+| ------------ | ------ | --------- | ------------------------------------------------------------------- |
+| `model_name` | string | *(req)*   | Model directory name in models/ (e.g. `Llama-3-8B`)                 |
+| `model_url`  | string | `""`      | Optional Git URL to clone the model from                            |
+| `device`     | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`          |
+| `profile`    | string | `default` | Compute profile: `really-low`, `low`, `default`, `high`             |
+| `model_lib`  | string | `""`      | Optional path to compiled `.so` library. If empty, uses default     |
+
+**Example — load test a model:**
+
+```bash
+curl -N -X POST http://localhost:8000/run \
+     -H 'Content-Type: application/json' \
+     -d '{"model_name": "Llama-3-8B", "device": "cuda", "profile": "default"}'
+```
+
+Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+
 ## 🗂️ Project Structure
 
 ```
@@ -283,7 +326,9 @@ Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on 
 │   ├── test_setup_check.py  # /setup-check tests (all mocked)
 │   ├── test_helpers.py  # Unit tests for app/helpers.py
 │   ├── test_convert.py  # build_convert_command helper + POST /convert route tests
-│   └── test_compile.py  # build_compile_command helper + POST /compile route tests
+│   ├── test_compile.py  # build_compile_command helper + POST /compile route tests
+│   ├── test_artifacts.py # discover_artifacts helper + GET /artifacts tests
+│   └── test_run.py      # build_run_command helper + POST /run route tests
 ├── .github/
 │   └── workflows/
 │       └── ci.yml       # GitHub Actions CI (push + PR)
