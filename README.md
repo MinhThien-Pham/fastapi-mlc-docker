@@ -48,7 +48,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | Method | Path       | Description                                                                   |
 | ------ | ---------- | ----------------------------------------------------------------------------- |
 | `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
-| `POST` | `/convert` | Convert/quantize raw model weights to MLC format; stream output as SSE        |
+| `POST` | `/quantize`| Convert/quantize raw model weights to MLC format; stream output as SSE        |
 | `POST` | `/compile` | Compile model library; stream output as SSE                                   |
 | `POST` | `/run`     | Load-test a model by initializing the interactive REPL; stream output as SSE  |
 
@@ -190,9 +190,9 @@ data: [HINT]        -d '{"action":"full","cutlass":"n","flash_infer":"n"}'
 
 > **Note:** `cutlass` and `flash_infer` already default to `"n"`. This hint is mainly useful if you explicitly enabled them and hit a build error.
 
-### Convert
+### Quantize
 
-#### `POST /convert`
+#### `POST /quantize`
 
 Quantizes (converts) raw model weights to MLC format and **streams stdout/stderr as SSE**.
 
@@ -201,7 +201,7 @@ Internally this calls the mlc-cli `quantize` sub-command, which runs two steps i
 1. `mlc_llm convert_weight` — convert Hugging Face weights to MLC format with the selected quantization.
 2. `mlc_llm gen_config`     — write the runtime config alongside the converted weights.
 
-**Pipeline position:** Run `/convert` *after* `/build` (which installs the `mlc-llm` Python package) and *before* `/run`.
+**Pipeline position:** Run `/quantize` *after* `/build` (which installs the `mlc-llm` Python package) and *before* `/run`.
 
 **Request body (`model` is required; all other fields are optional):**
 
@@ -223,10 +223,10 @@ Internally this calls the mlc-cli `quantize` sub-command, which runs two steps i
 | `conv_template` | string | `llama-3`  | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`   |
 | `output`        | string | `""`       | Output directory. If empty, mlc-cli uses `dist/<model_basename>-<quant>-MLC`               |
 
-**Example — convert a Llama-3 8B model:**
+**Example — quantize a Llama-3 8B model:**
 
 ```bash
-curl -N -X POST http://localhost:8000/convert \
+curl -N -X POST http://localhost:8000/quantize \
      -H 'Content-Type: application/json' \
      -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
 ```
@@ -281,7 +281,7 @@ Internally this calls the mlc-cli `run` sub-command.
 
 **LIMITATION**: The upstream `mlc-cli run` command is interactive by default and does NOT support a non-interactive single-shot `--prompt` flag. When called via this API endpoint, no standard input is provided. The subprocess will initialize the model, print its ready state, and immediately exit upon encountering EOF. This effectively serves as a "load test" to verify model and compiled library compatibility.
 
-**Pipeline position:** Run `/run` *after* `/compile` (and `/convert`). 
+**Pipeline position:** Run `/run` *after* `/compile` (and `/quantize`). 
 
 **Request body (`model_name` is required; all other fields are optional):**
 
@@ -325,7 +325,7 @@ Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on 
 │   ├── test_health.py   # /health and / endpoint tests
 │   ├── test_setup_check.py  # /setup-check tests (all mocked)
 │   ├── test_helpers.py  # Unit tests for app/helpers.py
-│   ├── test_convert.py  # build_convert_command helper + POST /convert route tests
+│   ├── test_quantize.py # build_quantize_command helper + POST /quantize route tests
 │   ├── test_compile.py  # build_compile_command helper + POST /compile route tests
 │   ├── test_artifacts.py # discover_artifacts helper + GET /artifacts tests
 │   └── test_run.py      # build_run_command helper + POST /run route tests

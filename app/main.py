@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.helpers import build_compile_command, build_convert_command, build_mlc_cli_command, build_run_command, detect_known_failure, discover_artifacts, run_tool_check
+from app.helpers import build_compile_command, build_mlc_cli_command, build_quantize_command, build_run_command, detect_known_failure, discover_artifacts, run_tool_check
 
 app = FastAPI(title="FastAPI MLC-CLI")
 
@@ -97,8 +97,8 @@ CONV_TEMPLATE_OPTIONS = Literal[
 ]
 
 
-class ConvertRequest(BaseModel):
-    """Request body for POST /convert.
+class QuantizeRequest(BaseModel):
+    """Request body for POST /quantize.
 
     ``model`` is required — it must be a path to a Hugging Face model directory
     (e.g. ``models/Llama-3-8B``) or a Hugging Face hub identifier.
@@ -300,10 +300,11 @@ async def build(req: BuildRequest):
     )
 
 
-# ── Convert endpoint ────────────────────────────────────────────────────────────────
+# ── Quantize endpoint ────────────────────────────────────────────────────────────────
 
-@app.post("/convert")
-async def convert(req: ConvertRequest):
+@app.post("/quantize")
+@app.post("/convert", include_in_schema=False)
+async def quantize_model(req: QuantizeRequest):
     """Quantize (convert) raw model weights to MLC format and stream output as SSE.
 
     Internally this calls the mlc-cli ``quantize`` sub-command which runs:
@@ -315,9 +316,9 @@ async def convert(req: ConvertRequest):
     If ``output`` is omitted, mlc-cli derives a default path of the form
     ``dist/<model_basename>-<quant>-MLC``.
 
-    Example — convert a locally-cloned Llama-3 8B model::
+    Example — quantize a locally-cloned Llama-3 8B model::
 
-        curl -N -X POST http://localhost:8000/convert \\
+        curl -N -X POST http://localhost:8000/quantize \\
              -H 'Content-Type: application/json' \\
              -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
 
@@ -330,7 +331,7 @@ async def convert(req: ConvertRequest):
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    cmd = build_convert_command(req)
+    cmd = build_quantize_command(req)
 
     return StreamingResponse(
         stream_subprocess(cmd, cwd=MLC_CLI_PATH),

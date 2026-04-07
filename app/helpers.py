@@ -123,10 +123,10 @@ def build_mlc_cli_command(req: Any) -> list[str]:
 
 
 
-# ── Convert (quantize) command construction ───────────────────────────────────
+# ── Quantize command construction ─────────────────────────────────────────────
 
-def build_convert_command(req: Any) -> list[str]:
-    """Translate a *ConvertRequest* into the ``go run . quantize`` argument list.
+def build_quantize_command(req: Any) -> list[str]:
+    """Translate a *QuantizeRequest* into the ``go run . quantize`` argument list.
 
     This wraps the mlc-cli ``quantize`` sub-command which runs two steps:
 
