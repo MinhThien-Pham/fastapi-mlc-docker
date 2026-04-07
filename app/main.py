@@ -437,7 +437,8 @@ def get_artifacts():
     
     counts = {
         "build": sum(1 for a in artifacts if a["source_step"] == "build"),
-        "convert": sum(1 for a in artifacts if a["source_step"] == "convert"),
+        "convert": sum(1 for a in artifacts if a["source_step"] in ("convert", "quantize")),
+        "quantize": sum(1 for a in artifacts if a["source_step"] in ("convert", "quantize")),
         "compile": sum(1 for a in artifacts if a["source_step"] == "compile"),
         "total": len(artifacts),
     }

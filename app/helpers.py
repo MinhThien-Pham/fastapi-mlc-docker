@@ -217,7 +217,7 @@ def discover_artifacts(base_path: Path) -> list[dict]:
 
     # 1. Look for wheels (build step)
     for whl in base_path.rglob("*.whl"):
-        if "node_modules" in whl.parts:
+        if "node_modules" in whl.parts or ".git" in whl.parts:
             continue
         try:
             stat = whl.stat()
@@ -232,40 +232,42 @@ def discover_artifacts(base_path: Path) -> list[dict]:
         except OSError:
             pass
         
-    dist_dir = base_path / "dist"
-    if dist_dir.exists() and dist_dir.is_dir():
-        # 2. Look for converted models (convert step)
-        for p in dist_dir.iterdir():
-            if p.is_dir() and (p / "mlc-chat-config.json").exists():
-                try:
-                    stat = p.stat()
-                    # Calculate total size of the directory
-                    total_size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-                    artifacts.append({
-                        "type": "model_dir",
-                        "name": p.name,
-                        "path": str(p.relative_to(base_path)),
-                        "source_step": "convert",
-                        "size_bytes": total_size,
-                        "modified_time": stat.st_mtime,
-                    })
-                except OSError:
-                    pass
+    # 2. Look for converted models (quantize step)
+    for config in base_path.rglob("mlc-chat-config.json"):
+        if "node_modules" in config.parts or ".git" in config.parts:
+            continue
+        p = config.parent
+        try:
+            stat = p.stat()
+            # Calculate total size of the directory
+            total_size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            artifacts.append({
+                "type": "model_dir",
+                "name": p.name,
+                "path": str(p.relative_to(base_path)),
+                "source_step": "quantize",
+                "size_bytes": total_size,
+                "modified_time": stat.st_mtime,
+            })
+        except OSError:
+            pass
 
-        # 3. Look for compiled libraries (compile step)
-        for ext in ("*.so", "*.dylib", "*.dll"):
-            for lib in dist_dir.rglob(ext):
-                try:
-                    stat = lib.stat()
-                    artifacts.append({
-                        "type": "compiled_lib",
-                        "name": lib.name,
-                        "path": str(lib.relative_to(base_path)),
-                        "source_step": "compile",
-                        "size_bytes": stat.st_size,
-                        "modified_time": stat.st_mtime,
-                    })
-                except OSError:
-                    pass
+    # 3. Look for compiled libraries (compile step)
+    for ext in ("*.so", "*.dylib", "*.dll"):
+        for lib in base_path.rglob(ext):
+            if "node_modules" in lib.parts or ".git" in lib.parts:
+                continue
+            try:
+                stat = lib.stat()
+                artifacts.append({
+                    "type": "compiled_lib",
+                    "name": lib.name,
+                    "path": str(lib.relative_to(base_path)),
+                    "source_step": "compile",
+                    "size_bytes": stat.st_size,
+                    "modified_time": stat.st_mtime,
+                })
+            except OSError:
+                pass
 
     return artifacts

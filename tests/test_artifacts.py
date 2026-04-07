@@ -20,14 +20,14 @@ def _create_mock_wheel(base_path: Path, name: str) -> Path:
     return p
 
 def _create_mock_model_dir(base_path: Path, name: str) -> Path:
-    p = base_path / "dist" / name
+    p = base_path / "models" / name
     p.mkdir(parents=True, exist_ok=True)
     (p / "mlc-chat-config.json").write_text("{}")
     (p / "ndarray-cache.json").write_text("{}")
     return p
 
 def _create_mock_compiled_lib(base_path: Path, name: str) -> Path:
-    p = base_path / "dist" / name
+    p = base_path / name
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("fake compiled lib content")
     return p
@@ -49,8 +49,9 @@ class TestDiscoverArtifacts:
         _create_mock_wheel(tmp_path, "build/mlc_llm-0.1.0-cp310-cp310-linux_x86_64.whl")
         _create_mock_wheel(tmp_path, "python/dist/mlc_llm-0.1.0-py3-none-any.whl")
         
-        # Should ignore node_modules
+        # Should ignore node_modules and .git
         _create_mock_wheel(tmp_path, "node_modules/some-module/fake.whl")
+        _create_mock_wheel(tmp_path, ".git/objects/fake.whl")
 
         artifacts = discover_artifacts(tmp_path)
         wheels = [a for a in artifacts if a["type"] == "wheel"]
@@ -65,25 +66,26 @@ class TestDiscoverArtifacts:
     def test_discovers_model_dirs(self, tmp_path):
         _create_mock_model_dir(tmp_path, "Llama-3-8B-q4f16_1-MLC")
         
-        # A plain dir in dist without mlc-chat-config.json should be ignored
-        (tmp_path / "dist" / "empty_dir").mkdir(parents=True, exist_ok=True)
+        # Ignored paths
+        (tmp_path / ".git" / "models" / "fake").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".git" / "models" / "fake" / "mlc-chat-config.json").write_text("{}")
 
         artifacts = discover_artifacts(tmp_path)
         models = [a for a in artifacts if a["type"] == "model_dir"]
         
         assert len(models) == 1
         assert models[0]["name"] == "Llama-3-8B-q4f16_1-MLC"
-        assert models[0]["source_step"] == "convert"
+        assert models[0]["source_step"] == "quantize"
         assert models[0]["size_bytes"] == 4  # 2 chars per json file * 2
 
     def test_discovers_compiled_libs(self, tmp_path):
-        _create_mock_compiled_lib(tmp_path, "Llama-3-8B-q4f16_1-MLC/Llama-3-8B-q4f16_1-cuda.so")
+        _create_mock_compiled_lib(tmp_path, "dist/Llama-3-8B-q4f16_1-cuda.so")
         _create_mock_compiled_lib(tmp_path, "lib/some_lib.dylib")
-        _create_mock_compiled_lib(tmp_path, "lib/another.dll")
+        _create_mock_compiled_lib(tmp_path, "build/another.dll")
         
-        # outside dist should be ignored
-        (tmp_path / "build" / "ignored.so").parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / "build" / "ignored.so").write_text("ignored")
+        # ignored paths
+        (tmp_path / "node_modules" / "ignored.so").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "node_modules" / "ignored.so").write_text("ignored")
 
         artifacts = discover_artifacts(tmp_path)
         libs = [a for a in artifacts if a["type"] == "compiled_lib"]
@@ -116,7 +118,7 @@ class TestGetArtifactsRoute:
 
         _create_mock_wheel(fake_repo, "build/wheel.whl")
         _create_mock_model_dir(fake_repo, "model_dir")
-        _create_mock_compiled_lib(fake_repo, "model_dir/lib.so")
+        _create_mock_compiled_lib(fake_repo, "dist/lib.so")
 
         resp = client.get("/artifacts")
         assert resp.status_code == 200
@@ -125,6 +127,7 @@ class TestGetArtifactsRoute:
         assert data["status"] == "ok"
         assert data["counts"]["build"] == 1
         assert data["counts"]["convert"] == 1
+        assert data["counts"]["quantize"] == 1
         assert data["counts"]["compile"] == 1
         assert data["counts"]["total"] == 3
         
