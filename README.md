@@ -394,8 +394,44 @@ It performs the following steps sequentially against the API (`http://localhost:
 4. **Repo Status**: Checks for uncommitted changes.
 5. **Fast Build**: Triggers a fast wheel-only build (`action=install-wheels`).
 6. **Artifacts**: Discovers existing models/wheels.
-7. **Run Load-Test**: Initiates an interactive stream test (mocked EOF) for a placeholder model.
+7. **Run Load-Test**: Dynamically picks a local model from `/artifacts` to load-test, or gracefully skips if none are found.
 
 **Optional Environment Variables for Smoke Test:**
 - `RUN_MODEL_NAME`, `RUN_MODEL_URL`, `RUN_MODEL_LIB`, `RUN_DEVICE`: Manually specify the target model for `/run` instead of auto-discovering one from `/artifacts`.
 - `DOWNLOAD_RUN_MODEL_IF_MISSING=1`: If no model is provided or discovered, automatically download and load-test `TinyLlama-1.1B` to forcefully test `/run` instead of skipping it.
+
+## 🏗️ Full Pipeline Integration Test
+
+`tests/integration/test_full_pipeline.py` is a heavy, manual end-to-end integration test that exercises the entire `mlc-cli` workflow. It sequentially tests the build, quantize, compile, artifact verification, and run load-test stages.
+
+**Important:** The FastAPI application must already be running locally at `http://localhost:8000` before executing this test.
+
+Since it takes significant time and resources, it is separate from the lightweight smoke test. It requires a raw unquantized Hugging Face model to quantize. By default, it will automatically clone a lightweight raw model (`TinyLlama`) into a local `.raw_model_cache` folder for testing, or you can provide your own explicitly.
+
+**Disk Space Note:** This test may use several GBs of disk space due to the raw model cache, quantized model outputs, compiled artifacts, and related caches.
+
+```bash
+# Required tools for the auto-download fallback:
+pip install httpx
+# Ensure `git` and `git-lfs` are installed on your system.
+
+# Option A: Run automatically (will automatically clone and cache a small raw TinyLlama model locally if needed)
+python tests/integration/test_full_pipeline.py
+
+# Option B: Provide the path to your own raw unquantized model weights
+export FULL_RAW_MODEL=/path/to/local/hf/weights
+python tests/integration/test_full_pipeline.py
+```
+
+**Cleanup**
+If you rely on the auto-downloaded fallback (Option A) and want the script to delete the cloned raw model folder from your disk after the test completes, run it with:
+```bash
+CLEANUP_FULL_MODEL=1 python tests/integration/test_full_pipeline.py
+```
+*(Note: Cleanup only removes the `.raw_model_cache` if it was freshly downloaded during this specific run; it will not delete a previously reused cache).*
+
+**Optional overrides:**
+- `FULL_BUILD_ACTION` (default: `install-wheels`)
+- `FULL_CONV_TEMPLATE`: Usually auto-detected from path/config. Use to override.
+- `FULL_QUANT` (default: `q4f16_1`)
+- `FULL_DEVICE` (default: `cuda`)

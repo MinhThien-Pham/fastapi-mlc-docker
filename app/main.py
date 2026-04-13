@@ -88,9 +88,13 @@ QUANT_OPTIONS = Literal[
 ]
 
 CONV_TEMPLATE_OPTIONS = Literal[
+    "llama-3.1",
     "llama-3",
+    "llama-2",
     "chatml",
     "mistral_default",
+    "ministral",
+    "phi-3",
     "phi-2",
     "gemma",
     "qwen2",
