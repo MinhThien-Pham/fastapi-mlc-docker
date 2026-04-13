@@ -321,36 +321,40 @@ Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on 
 │   ├── main.py          # FastAPI application (routes)
 │   └── helpers.py       # Pure helper functions (testable without FastAPI)
 ├── tests/
-│   ├── conftest.py      # Shared pytest fixtures
-│   ├── test_health.py   # /health and / endpoint tests
-│   ├── test_setup_check.py  # /setup-check tests (all mocked)
-│   ├── test_helpers.py  # Unit tests for app/helpers.py
-│   ├── test_quantize.py # build_quantize_command helper + POST /quantize route tests
-│   ├── test_compile.py  # build_compile_command helper + POST /compile route tests
-│   ├── test_artifacts.py # discover_artifacts helper + GET /artifacts tests
-│   └── test_run.py      # build_run_command helper + POST /run route tests
+│   ├── unit/            # Fast, mocked unit tests (no container needed)
+│   │   ├── conftest.py
+│   │   ├── test_health.py
+│   │   ├── test_setup_check.py
+│   │   ├── test_helpers.py
+│   │   ├── test_quantize.py
+│   │   ├── test_compile.py
+│   │   ├── test_artifacts.py
+│   │   └── test_run.py
+│   └── integration/     # Live smoke tests against running API
+│       └── test_smoke.py
 ├── .github/
 │   └── workflows/
 │       └── ci.yml       # GitHub Actions CI (push + PR)
 ├── Dockerfile           # CUDA 12.6 + Go 1.24 + Miniconda image
 ├── docker-compose.yml   # Service definition with GPU passthrough
 ├── requirements.txt     # FastAPI, Uvicorn, HTTPX, pytest, pytest-cov
-└── test_pipeline.py     # End-to-end integration script (requires live container)
 ```
 
 ## 🧪 Running Tests Locally
 
-No Docker, GPU, Go, or Conda needed — tests use mocks.
+### Unit Tests (Fast & Mocked)
+
+No Docker, GPU, Go, or Conda needed — these tests use mocks.
 
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run the full test suite
-pytest tests/ -v
+# 2. Run the unit test suite
+pytest tests/unit/ -v
 
 # 3. Run with coverage report
-pytest tests/ -v --cov=app --cov-report=term-missing
+pytest tests/unit/ -v --cov=app --cov-report=term-missing
 ```
 
 ## 🤖 CI (GitHub Actions)
@@ -372,18 +376,26 @@ No GPU or Docker is required in CI — all tests use mocks.
 - **Python venv**: isolated at `/opt/venv` for the FastAPI app
 - **Workspace volume**: `mlc_workspace` is mounted at `/workspace` — the `mlc-cli` repo and build artefacts persist across container restarts
 
-## 🧪 `test_pipeline.py` — End-to-End API Test
+## 🧪 Integration Smoke Test
 
-`test_pipeline.py` is an automated test script that interacts with the containerised API to verify the full `mlc-cli` build lifecycle:
+`tests/integration/test_smoke.py` is a lightweight script that interacts with the containerised API to verify endpoints are alive and routing correctly. It tests the fast "install-wheels" build path and triggers a lightweight load test.
 
 ```bash
 # Requires httpx
 pip install httpx
-python test_pipeline.py
+python tests/integration/test_smoke.py
 ```
 
 It performs the following steps sequentially against the API (`http://localhost:8000`):
 
-1. **Setup Check**: Verifies the repository exists and forces a clone if missing.
-2. **Repo Status**: Calls `/repo-status` to check if the repository is clean or has uncommitted changes.
-3. **Full Build**: Starts a complete build with CUDA 86, cuBLAS, and bundled TVM, streaming the output live via Server-Sent Events (SSE).
+1. **Health Check**: Validates API is up.
+2. **Setup Check**: Checks if repo is pulled.
+3. **Ensure Repo Exists**: Clones `mlc-cli` if necessary.
+4. **Repo Status**: Checks for uncommitted changes.
+5. **Fast Build**: Triggers a fast wheel-only build (`action=install-wheels`).
+6. **Artifacts**: Discovers existing models/wheels.
+7. **Run Load-Test**: Initiates an interactive stream test (mocked EOF) for a placeholder model.
+
+**Optional Environment Variables for Smoke Test:**
+- `RUN_MODEL_NAME`, `RUN_MODEL_URL`, `RUN_MODEL_LIB`, `RUN_DEVICE`: Manually specify the target model for `/run` instead of auto-discovering one from `/artifacts`.
+- `DOWNLOAD_RUN_MODEL_IF_MISSING=1`: If no model is provided or discovered, automatically download and load-test `TinyLlama-1.1B` to forcefully test `/run` instead of skipping it.
