@@ -135,6 +135,7 @@ class TestQuantizeRouteRepoPresent:
     def test_returns_200_sse_on_success(self, client, monkeypatch, tmp_path):
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
+        (fake_repo / "models" / "Llama-3-8B").mkdir(parents=True)
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
 
         fake_stream = self._fake_stream(["data: quantizing...\n\n", "data: [DONE]\n\n"])
@@ -147,6 +148,7 @@ class TestQuantizeRouteRepoPresent:
     def test_done_marker_present_on_success(self, client, monkeypatch, tmp_path):
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
+        (fake_repo / "models" / "Llama-3-8B").mkdir(parents=True)
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
 
         fake_stream = self._fake_stream(["data: [DONE]\n\n"])
@@ -159,6 +161,7 @@ class TestQuantizeRouteRepoPresent:
         """Sending only 'model' (all others at default) must not 422."""
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
+        (fake_repo / "models" / "Llama-3-8B").mkdir(parents=True)
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
 
         fake_stream = self._fake_stream(["data: [DONE]\n\n"])
@@ -192,6 +195,7 @@ class TestQuantizeRouteRepoPresent:
     def test_cache_control_header_set(self, client, monkeypatch, tmp_path):
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
+        (fake_repo / "models" / "Llama-3-8B").mkdir(parents=True)
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
 
         fake_stream = self._fake_stream(["data: [DONE]\n\n"])
