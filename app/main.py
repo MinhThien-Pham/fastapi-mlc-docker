@@ -415,6 +415,27 @@ async def run_model(req: RunRequest):
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
+    # ── Normalize model_lib: resolve relative paths against the workspace ─────
+    if req.model_lib:
+        lib_path = Path(req.model_lib)
+        if not lib_path.is_absolute():
+            lib_path = MLC_CLI_PATH / lib_path
+        resolved_lib = lib_path.resolve()
+
+        if not resolved_lib.is_file():
+            original = req.model_lib
+            async def lib_error_stream():
+                yield (
+                    f"data: [ERROR] model_lib not found.\n\n"
+                    f"data:   original:  {original}\n\n"
+                    f"data:   resolved:  {resolved_lib}\n\n"
+                )
+            return StreamingResponse(lib_error_stream(), media_type="text/event-stream")
+
+        # Replace with the resolved absolute path so the upstream script works
+        # regardless of its own cwd changes.
+        req = req.model_copy(update={"model_lib": str(resolved_lib)})
+
     cmd = build_run_command(req)
 
     return StreamingResponse(

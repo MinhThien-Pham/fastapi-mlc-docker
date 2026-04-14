@@ -301,7 +301,7 @@ Internally this calls the mlc-cli `run` sub-command.
 | `model_url`  | string | `""`      | Optional Git URL to clone the model from                            |
 | `device`     | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`          |
 | `profile`    | string | `default` | Compute profile: `really-low`, `low`, `default`, `high`             |
-| `model_lib`  | string | `""`      | Optional path to compiled `.so` library. If empty, uses default     |
+| `model_lib`  | string | `""`      | Optional path to compiled `.so` library. Relative paths are resolved against the workspace root |
 
 **Example — load test a model:**
 

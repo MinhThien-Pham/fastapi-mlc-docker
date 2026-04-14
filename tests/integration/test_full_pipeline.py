@@ -246,12 +246,7 @@ def main():
                 run_payload["model_url"] = full_model_url
                 
             run_model_lib = full_model_lib if full_model_lib else lib_path
-            
-            # linux_run_model.sh changes the working directory, breaking relative paths.
-            # Provide the absolute path inside the container workspace.
-            container_run_model_lib = f"/workspace/mlc-cli/{run_model_lib}" if not run_model_lib.startswith("/") else run_model_lib
-            
-            run_payload["model_lib"] = container_run_model_lib
+            run_payload["model_lib"] = run_model_lib
             
             stream_endpoint(client, "POST", "/run", json_payload=run_payload)
             
