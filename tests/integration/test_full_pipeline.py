@@ -100,7 +100,6 @@ def main():
 
     if full_raw_model:
         print(f"   -> [EXPLICIT] Using provided FULL_RAW_MODEL: {full_raw_model}")
-        full_raw_model_container = full_raw_model
     else:
         # Auto-fallback: Download local deterministic raw model
         cache_dir = ".raw_model_cache"
@@ -113,7 +112,6 @@ def main():
         if os.path.exists(model_path) and has_config and has_weights:
             print(f"   -> [FALLBACK CACHE] Reusing previously downloaded raw model: {model_path}")
             full_raw_model = model_path
-            full_raw_model_container = f"/app/{model_path}"
             download_cache_path = model_path
         else:
             print(f"   -> [FALLBACK DOWNLOAD] Auto-preparing raw model in: {model_path}")
@@ -144,7 +142,6 @@ def main():
                 sys.exit(1)
             
             full_raw_model = model_path
-            full_raw_model_container = f"/app/{model_path}"
             download_cache_path = model_path
             was_downloaded_this_run = True
 
@@ -190,7 +187,7 @@ def main():
             # Step 6: Quantize
             print("\n6. Testing /quantize stream...")
             quantize_payload = {
-                "model": full_raw_model_container,
+                "model": full_raw_model,
                 "quant": full_quant,
                 "device": full_device,
                 "conv_template": full_conv_template

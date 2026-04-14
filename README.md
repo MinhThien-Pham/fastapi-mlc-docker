@@ -217,7 +217,7 @@ Internally this calls the mlc-cli `quantize` sub-command, which runs two steps i
 
 | Field           | Type   | Default    | Notes                                                                                        |
 | --------------- | ------ | ---------- | -------------------------------------------------------------------------------------------- |
-| `model`         | string | *(required)* | Path to a local model dir (e.g. `models/Llama-3-8B`) or a Hugging Face hub identifier     |
+| `model`         | string | *(required)* | Path to a local model dir (e.g. `models/Llama-3-8B`). Relative paths are resolved against the workspace root |
 | `quant`         | string | `q4f16_1`  | Quantization: `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`  |
 | `device`        | string | `cuda`     | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                  |
 | `conv_template` | string | `llama-3`  | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`   |
@@ -256,7 +256,7 @@ Internally this calls the mlc-cli `compile` sub-command.
 
 | Field    | Type   | Default   | Notes                                                              |
 | -------- | ------ | --------- | ------------------------------------------------------------------ |
-| `model`  | string | *(req)*   | Path to a local model dir (e.g. `models/Llama-3-8B`)               |
+| `model`  | string | *(req)*   | Path to a local model dir (e.g. `dist/Llama-3-8B-q4f16_1-MLC`). Relative paths are resolved against the workspace root |
 | `quant`  | string | `q4f16_1` | Quantization: `q4f16_1`, `q0f32`, etc.                             |
 | `device` | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`         |
 | `output` | string | `""`      | Output directory or file path. If empty, uses default              |

@@ -335,6 +335,24 @@ async def quantize_model(req: QuantizeRequest):
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
+    # ── Normalize model path: resolve relative paths against the workspace ────
+    model_path = Path(req.model)
+    if not model_path.is_absolute():
+        model_path = MLC_CLI_PATH / model_path
+    resolved_model = model_path.resolve()
+
+    if not resolved_model.exists():
+        original = req.model
+        async def model_error_stream():
+            yield (
+                f"data: [ERROR] model path not found.\n\n"
+                f"data:   original:  {original}\n\n"
+                f"data:   resolved:  {resolved_model}\n\n"
+            )
+        return StreamingResponse(model_error_stream(), media_type="text/event-stream")
+
+    req = req.model_copy(update={"model": str(resolved_model)})
+
     cmd = build_quantize_command(req)
 
     return StreamingResponse(
@@ -370,6 +388,24 @@ async def compile_model(req: CompileRequest):
         async def error_stream():
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    # ── Normalize model path: resolve relative paths against the workspace ────
+    model_path = Path(req.model)
+    if not model_path.is_absolute():
+        model_path = MLC_CLI_PATH / model_path
+    resolved_model = model_path.resolve()
+
+    if not resolved_model.exists():
+        original = req.model
+        async def model_error_stream():
+            yield (
+                f"data: [ERROR] model path not found.\n\n"
+                f"data:   original:  {original}\n\n"
+                f"data:   resolved:  {resolved_model}\n\n"
+            )
+        return StreamingResponse(model_error_stream(), media_type="text/event-stream")
+
+    req = req.model_copy(update={"model": str(resolved_model)})
 
     cmd = build_compile_command(req)
 
