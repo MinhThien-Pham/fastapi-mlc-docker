@@ -112,6 +112,16 @@ jobs:
           Check the workflow logs for details. No issue created automatically.
           EOF
 
+      - name: Ensure drift label exists
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "upstream-contract-fail" \
+            --color "E11D48" \
+            --description "Upstream mlc-cli CLI contract check failed" \
+            2>/dev/null || true
+
       - name: Check for existing drift issue
         if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
         id: existing
@@ -153,5 +163,5 @@ jobs:
           )"
 
       - name: Fail workflow on contract failure
-        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status != 'pass'
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
         run: exit 1
