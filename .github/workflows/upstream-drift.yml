@@ -1,0 +1,157 @@
+name: Upstream Contract Check
+
+on:
+  schedule:
+    - cron: '0 14 * * 1'  # Monday 10am EDT (14:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Read verified SHA
+        id: pinned
+        run: |
+          SHA=$(python3 -c "import json; print(json.load(open('.upstream-sha.json'))['verified_sha'])")
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Verified SHA: $SHA"
+
+      - name: Fetch upstream HEAD
+        id: upstream
+        run: |
+          SHA=$(git ls-remote https://github.com/ballinyouup/mlc-cli.git HEAD | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Upstream HEAD: $SHA"
+
+      - name: Compare SHAs
+        id: compare
+        run: |
+          if [ "${{ steps.pinned.outputs.sha }}" = "${{ steps.upstream.outputs.sha }}" ]; then
+            echo "✅ No drift. Upstream SHA matches verified SHA."
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            echo "## ✅ No upstream drift" >> "$GITHUB_STEP_SUMMARY"
+            echo "Upstream HEAD matches verified SHA: \`${{ steps.pinned.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ Drift detected."
+            echo "  Verified: ${{ steps.pinned.outputs.sha }}"
+            echo "  Upstream: ${{ steps.upstream.outputs.sha }}"
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone upstream
+        if: steps.compare.outputs.drifted == 'true'
+        run: git clone --depth 1 https://github.com/ballinyouup/mlc-cli.git /tmp/mlc-cli-upstream
+
+      - name: Run contract check
+        if: steps.compare.outputs.drifted == 'true'
+        id: contract
+        run: |
+          set +e
+          python tests/upstream/check_cli_contract.py /tmp/mlc-cli-upstream
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+          elif [ $EXIT_CODE -eq 1 ]; then
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=inconclusive" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write summary (contract passed)
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'pass'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## ✅ Upstream drift detected — contract check PASSED
+
+          | | SHA |
+          |--|-----|
+          | **Verified** | `${{ steps.pinned.outputs.sha }}` |
+          | **Upstream HEAD** | `${{ steps.upstream.outputs.sha }}` |
+
+          The CLI interface contract is intact. No automated issue created.
+
+          **Next step:** When convenient, manually run smoke/full integration tests
+          against the new upstream version, then update `.upstream-sha.json`.
+          EOF
+
+      - name: Write summary (contract failed)
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## ❌ Upstream drift detected — contract check FAILED
+
+          | | SHA |
+          |--|-----|
+          | **Verified** | `${{ steps.pinned.outputs.sha }}` |
+          | **Upstream HEAD** | `${{ steps.upstream.outputs.sha }}` |
+
+          The upstream CLI interface has changed in ways that will break our API wrapper.
+          A GitHub issue has been created.
+          EOF
+
+      - name: Write summary (inconclusive)
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'inconclusive'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## ⚠️ Upstream drift detected — contract check INCONCLUSIVE
+
+          Could not complete the contract check (source structure changed, parse error, etc.).
+          Check the workflow logs for details. No issue created automatically.
+          EOF
+
+      - name: Check for existing drift issue
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list --label upstream-contract-fail --state open --json number | jq length)
+          echo "open_issues=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue on contract failure
+        if: >-
+          steps.compare.outputs.drifted == 'true' &&
+          steps.contract.outputs.status == 'fail' &&
+          steps.existing.outputs.open_issues == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OLD="${{ steps.pinned.outputs.sha }}"
+          NEW="${{ steps.upstream.outputs.sha }}"
+          gh issue create \
+            --title "❌ Upstream mlc-cli contract check failed" \
+            --label "upstream-contract-fail" \
+            --body "$(cat <<BODY
+          The weekly upstream contract check detected interface changes in \`mlc-cli\` that will break our API wrapper.
+
+          | | SHA |
+          |--|-----|
+          | **Last verified** | \`${OLD}\` |
+          | **Upstream HEAD** | \`${NEW}\` |
+          | **Diff** | [compare](https://github.com/ballinyouup/mlc-cli/compare/${OLD}...${NEW}) |
+
+          ### What to do
+          1. Review the [upstream diff](https://github.com/ballinyouup/mlc-cli/compare/${OLD}...${NEW})
+          2. Update \`app/helpers.py\` to match any changed CLI flags
+          3. Update \`tests/upstream/check_cli_contract.py\` contract if needed
+          4. Run smoke + full integration tests
+          5. Update \`.upstream-sha.json\` and close this issue
+          BODY
+          )"
+
+      - name: Fail workflow on contract failure
+        if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status != 'pass'
+        run: exit 1
