@@ -243,6 +243,8 @@ def main():
 
     print(f"\n⚠️  Candidate {candidate_sha[:12]} differs from pinned {pinned_sha[:12]}")
 
+    original_container_sha = read_container_sha()
+
     # Checkout candidate in container
     checkout_in_container(candidate_sha)
 
@@ -253,23 +255,35 @@ def main():
 
     print("\nRunning verification tests against candidate...\n")
 
-    # Smoke test
-    smoke_ok = run_test("Smoke Integration Test", SMOKE)
-    if not smoke_ok:
-        print("\n❌ Smoke failed — skipping full test.")
-        print(f"[INFO] Reverting container to pinned SHA {pinned_sha[:12]}...")
-        checkout_in_container(pinned_sha)
-        handle_issues(candidate_sha, False, None, False, False)
+    verification_success = False
+    try:
+        # Smoke test
+        smoke_ok = run_test("Smoke Integration Test", SMOKE)
+        if not smoke_ok:
+            print("\n❌ Smoke failed — skipping full test.")
+            handle_issues(candidate_sha, False, None, False, False)
+            sys.exit(1)
+
+        # Full test
+        full_ok = run_test("Full Integration Test", FULL)
+        if not full_ok:
+            print("\n❌ Full test failed.")
+            handle_issues(candidate_sha, True, False, False, False)
+            sys.exit(1)
+            
+        verification_success = True
+
+    except SystemExit:
+        # Re-raise SystemExit so sys.exit(1) calls propagate normally after finally block
+        raise
+    except Exception as e:
+        print(f"\n❌ Unexpected error during verification: {e}")
         sys.exit(1)
 
-    # Full test
-    full_ok = run_test("Full Integration Test", FULL)
-    if not full_ok:
-        print("\n❌ Full test failed.")
-        print(f"[INFO] Reverting container to pinned SHA {pinned_sha[:12]}...")
-        checkout_in_container(pinned_sha)
-        handle_issues(candidate_sha, True, False, False, False)
-        sys.exit(1)
+    finally:
+        if not verification_success:
+            print(f"\n[INFO] Rolling back container to original SHA {original_container_sha[:12]}...")
+            checkout_in_container(original_container_sha)
 
     # Both passed — promote candidate to pinned
     print("\n✅ All tests passed. Promoting candidate to pinned.")
