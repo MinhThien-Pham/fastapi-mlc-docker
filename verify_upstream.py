@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 METADATA = Path(".upstream-sha.json")
+RECOVERY_MARKER = Path(".upstream-verify-recovery.json")
 REPO_URL = "https://github.com/ballinyouup/mlc-cli.git"
 API_URL = "http://localhost:8000"
 SMOKE = "tests/integration/test_smoke.py"
@@ -232,6 +233,21 @@ def main():
     print("=== Manual Upstream Verification ===\n")
     preflight(want_push=args.push)
 
+    # ── Recovery check ──
+    if RECOVERY_MARKER.exists():
+        print("⚠️  Found recovery marker from an interrupted verification.")
+        try:
+            recovery_data = json.loads(RECOVERY_MARKER.read_text())
+            orig_sha = recovery_data.get("original_container_sha")
+            if orig_sha:
+                print(f"[INFO] Restoring container to original SHA {orig_sha[:12]}...")
+                checkout_in_container(orig_sha)
+        except Exception as e:
+            print(f"[WARN] Failed to read or apply recovery marker: {e}")
+        finally:
+            RECOVERY_MARKER.unlink()
+        die("Recovered from interrupted verification. Please run the script again.")
+
     pinned_sha = read_pinned_sha()
     candidate_sha = fetch_upstream_head()
     print(f"Pinned SHA:    {pinned_sha}")
@@ -244,6 +260,14 @@ def main():
     print(f"\n⚠️  Candidate {candidate_sha[:12]} differs from pinned {pinned_sha[:12]}")
 
     original_container_sha = read_container_sha()
+
+    # Create recovery marker
+    recovery_data = {
+        "original_container_sha": original_container_sha,
+        "candidate_sha": candidate_sha,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    RECOVERY_MARKER.write_text(json.dumps(recovery_data, indent=2) + "\n")
 
     # Checkout candidate in container
     checkout_in_container(candidate_sha)
@@ -284,6 +308,8 @@ def main():
         if not verification_success:
             print(f"\n[INFO] Rolling back container to original SHA {original_container_sha[:12]}...")
             checkout_in_container(original_container_sha)
+        if RECOVERY_MARKER.exists():
+            RECOVERY_MARKER.unlink()
 
     # Both passed — promote candidate to pinned
     print("\n✅ All tests passed. Promoting candidate to pinned.")
