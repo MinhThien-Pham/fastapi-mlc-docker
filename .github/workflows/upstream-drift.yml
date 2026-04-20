@@ -20,12 +20,12 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Read verified SHA
+      - name: Read pinned SHA
         id: pinned
         run: |
-          SHA=$(python3 -c "import json; print(json.load(open('.upstream-sha.json'))['verified_sha'])")
+          SHA=$(python3 -c "import json; print(json.load(open('.upstream-sha.json'))['pinned_sha'])")
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Verified SHA: $SHA"
+          echo "Pinned SHA: $SHA"
 
       - name: Fetch upstream HEAD
         id: upstream

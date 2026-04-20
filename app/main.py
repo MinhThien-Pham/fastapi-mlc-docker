@@ -214,20 +214,38 @@ def setup_check():
 
 @app.post("/ensure-repo-exists")
 def ensure_repo_exists():
+    # ── Read the pinned (approved) upstream SHA ──────────────────────────────
+    pinned_sha = None
+    upstream_meta = Path("/app/.upstream-sha.json")
+    if upstream_meta.is_file():
+        import json
+        try:
+            pinned_sha = json.loads(upstream_meta.read_text()).get("pinned_sha")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     if MLC_CLI_PATH.exists():
         return {
             "status": "ok",
             "message": "mlc-cli already exists",
             "path": str(MLC_CLI_PATH),
+            "pinned_sha": pinned_sha,
         }
 
     print(f"[INFO] Cloning {MLC_CLI_URL} into {MLC_CLI_PATH}...")
     try:
         run_git(["clone", MLC_CLI_URL, str(MLC_CLI_PATH)])
+
+        # Pin to the approved SHA so fresh clones use the tested version
+        if pinned_sha:
+            print(f"[INFO] Checking out pinned SHA {pinned_sha[:12]}...")
+            run_git(["-C", str(MLC_CLI_PATH), "checkout", pinned_sha])
+
         return {
             "status": "ok",
             "message": "mlc-cli cloned successfully",
             "path": str(MLC_CLI_PATH),
+            "pinned_sha": pinned_sha,
         }
     except subprocess.CalledProcessError as exc:
         return {
@@ -335,10 +353,14 @@ async def quantize_model(req: QuantizeRequest):
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    # ── Normalize model path: resolve relative paths against the workspace ────
+    # ── Normalize model path: resolve relative paths against known roots ─────
     model_path = Path(req.model)
     if not model_path.is_absolute():
-        model_path = MLC_CLI_PATH / model_path
+        candidate = (MLC_CLI_PATH / model_path).resolve()
+        if candidate.exists():
+            model_path = candidate
+        else:
+            model_path = (Path.cwd() / model_path).resolve()
     resolved_model = model_path.resolve()
 
     if not resolved_model.exists():
@@ -389,10 +411,14 @@ async def compile_model(req: CompileRequest):
             yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    # ── Normalize model path: resolve relative paths against the workspace ────
+    # ── Normalize model path: resolve relative paths against known roots ─────
     model_path = Path(req.model)
     if not model_path.is_absolute():
-        model_path = MLC_CLI_PATH / model_path
+        candidate = (MLC_CLI_PATH / model_path).resolve()
+        if candidate.exists():
+            model_path = candidate
+        else:
+            model_path = (Path.cwd() / model_path).resolve()
     resolved_model = model_path.resolve()
 
     if not resolved_model.exists():

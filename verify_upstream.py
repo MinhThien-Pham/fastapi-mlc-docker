@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Manual upstream verification for fastapi-mlc-docker.
 
-Verifies the mlc-cli SHA running in Docker by executing smoke and full
-integration tests, then records the result.
+Tests the latest upstream mlc-cli HEAD as a candidate and promotes it
+to the pinned (approved) SHA if smoke + full integration tests pass.
+
+State model:
+  pinned_sha  — the approved upstream version this project uses
+  candidate   — upstream HEAD, fetched at verify time, tested intentionally
 
 Usage:
     python verify_upstream.py          # verify + commit, no push
@@ -32,12 +36,8 @@ def die(msg):
 # ── Preflight ────────────────────────────────────────────────────────────────
 
 def commits_ahead_of_remote():
-    """Return the number of local commits ahead of origin/main."""
     r = sh(["git", "rev-list", "--count", "origin/main..HEAD"])
-    if r.returncode != 0:
-        return -1  # unknown
-    return int(r.stdout.strip())
-
+    return int(r.stdout.strip()) if r.returncode == 0 else -1
 
 def preflight(want_push=False):
     print("=== Preflight Checks ===\n")
@@ -80,8 +80,15 @@ def preflight(want_push=False):
 
 # ── SHA helpers ──────────────────────────────────────────────────────────────
 
-def read_verified_sha():
-    return json.loads(METADATA.read_text()).get("verified_sha", "")
+def read_pinned_sha():
+    return json.loads(METADATA.read_text()).get("pinned_sha", "")
+
+def fetch_upstream_head():
+    """Get the latest SHA from Bryan's repo (the candidate)."""
+    r = sh(["git", "ls-remote", REPO_URL, "HEAD"])
+    if r.returncode != 0:
+        die(f"Cannot fetch upstream HEAD: {r.stderr.strip()}")
+    return r.stdout.split()[0]
 
 def read_container_sha():
     r = sh(["docker", "compose", "exec", "-T", "web",
@@ -89,6 +96,16 @@ def read_container_sha():
     if r.returncode != 0:
         die(f"Cannot read SHA from container: {r.stderr.strip()}")
     return r.stdout.strip()
+
+def checkout_in_container(sha):
+    """Update the container's mlc-cli to a specific SHA."""
+    print(f"\n[INFO] Updating container mlc-cli to {sha[:12]}...")
+    r = sh(["docker", "compose", "exec", "-T", "web",
+            "bash", "-c",
+            f"cd /workspace/mlc-cli && git fetch origin && git checkout {sha}"])
+    if r.returncode != 0:
+        die(f"Failed to checkout {sha[:12]} in container: {r.stderr.strip()}")
+    print(f"  ✓ Container now at {sha[:12]}")
 
 
 # ── Test execution ───────────────────────────────────────────────────────────
@@ -103,13 +120,13 @@ def run_test(label, script):
 # ── Metadata + Git ───────────────────────────────────────────────────────────
 
 def commit_metadata(sha):
-    data = {"repo": REPO_URL, "verified_sha": sha,
-            "verified_date": datetime.now(timezone.utc).astimezone().isoformat()}
+    data = {"repo": REPO_URL, "pinned_sha": sha,
+            "pinned_date": datetime.now(timezone.utc).astimezone().isoformat()}
     METADATA.write_text(json.dumps(data, indent=2) + "\n")
     subprocess.run(["git", "add", str(METADATA)], check=True)
     subprocess.run(["git", "commit", "-m",
-                    f"chore: verify upstream mlc-cli {sha[:12]}"], check=True)
-    print(f"\n[OK] Committed verification for {sha[:12]}")
+                    f"chore: pin upstream mlc-cli to {sha[:12]}"], check=True)
+    print(f"\n[OK] Pinned upstream to {sha[:12]}")
 
 def git_push():
     r = subprocess.run(["git", "push"], capture_output=True, text=True)
@@ -126,24 +143,17 @@ def gh_ok():
     return sh(["gh", "--version"]).returncode == 0
 
 def find_open_issue(sha):
-    """Find an open issue for a specific SHA.
-
-    Prefers an issue whose title or body mentions this SHA.
-    Falls back to a single open labeled issue (safe, unambiguous).
-    Returns None if multiple non-matching issues exist (ambiguous).
-    """
+    """Find an open issue for a specific SHA (or single open labeled issue)."""
     short = sha[:12]
     r = sh(["gh", "issue", "list", "--label", LABEL,
             "--state", "open", "--json", "number,title,body", "--limit", "10"])
     if r.returncode != 0:
         return None
     issues = json.loads(r.stdout)
-    # Prefer an issue that mentions this specific SHA
     for issue in issues:
         text = issue.get("title", "") + issue.get("body", "")
         if short in text or sha in text:
             return issue["number"]
-    # Fallback: only safe if exactly one open issue exists
     if len(issues) == 1:
         return issues[0]["number"]
     return None
@@ -160,10 +170,10 @@ def status_body(sha, smoke, full, verified, pushed):
     yn = lambda v: "✅ yes" if v else "❌ no"
     return (f"{MARKER}\n### Verification Status\n\n"
             f"| Field | Value |\n|-------|-------|\n"
-            f"| **SHA tested** | `{sha}` |\n"
+            f"| **Candidate SHA** | `{sha}` |\n"
             f"| **Smoke test** | {fmt(smoke)} |\n"
             f"| **Full test** | {fmt(full)} |\n"
-            f"| **Verified locally** | {yn(verified)} |\n"
+            f"| **Promoted to pinned** | {yn(verified)} |\n"
             f"| **Pushed** | {yn(pushed)} |\n"
             f"| **Last updated** | {ts} |\n")
 
@@ -187,7 +197,7 @@ def handle_issues(sha, smoke, full, verified, pushed):
         if issue_num:
             upsert_status(issue_num, body)
             sh(["gh", "issue", "close", str(issue_num),
-                "--comment", "Upstream verified and pushed. Closing."])
+                "--comment", "Candidate verified and promoted. Closing."])
             print(f"[OK] Closed issue #{issue_num}")
     elif verified:
         if issue_num:
@@ -203,7 +213,7 @@ def handle_issues(sha, smoke, full, verified, pushed):
             r = sh(["gh", "issue", "create",
                     "--title", f"⚠️ Upstream mlc-cli verification failed ({sha[:12]})",
                     "--label", LABEL,
-                    "--body", f"Manual verification failed for `{sha}`.\n\n{body}"])
+                    "--body", f"Manual verification failed for candidate `{sha}`.\n\n{body}"])
             if r.returncode == 0:
                 try:
                     new_num = int(r.stdout.strip().rstrip("/").split("/")[-1])
@@ -222,40 +232,56 @@ def main():
     print("=== Manual Upstream Verification ===\n")
     preflight(want_push=args.push)
 
-    verified_sha = read_verified_sha()
-    container_sha = read_container_sha()
-    print(f"Verified SHA:  {verified_sha}")
-    print(f"Container SHA: {container_sha}")
+    pinned_sha = read_pinned_sha()
+    candidate_sha = fetch_upstream_head()
+    print(f"Pinned SHA:    {pinned_sha}")
+    print(f"Candidate SHA: {candidate_sha}  (upstream HEAD)")
 
-    if container_sha == verified_sha:
-        print("\n✅ Already verified. Nothing to do.")
+    if candidate_sha == pinned_sha:
+        print("\n✅ Upstream HEAD matches pinned SHA. Nothing to do.")
         return
 
-    print(f"\n⚠️  Container has {container_sha[:12]}, verified is {verified_sha[:12]}")
-    print("Running verification tests...\n")
+    print(f"\n⚠️  Candidate {candidate_sha[:12]} differs from pinned {pinned_sha[:12]}")
 
+    # Checkout candidate in container
+    checkout_in_container(candidate_sha)
+
+    # Verify the container is now at the candidate
+    actual = read_container_sha()
+    if actual != candidate_sha:
+        die(f"Container SHA {actual[:12]} != candidate {candidate_sha[:12]} after checkout")
+
+    print("\nRunning verification tests against candidate...\n")
+
+    # Smoke test
     smoke_ok = run_test("Smoke Integration Test", SMOKE)
     if not smoke_ok:
         print("\n❌ Smoke failed — skipping full test.")
-        handle_issues(container_sha, False, None, False, False)
+        print(f"[INFO] Reverting container to pinned SHA {pinned_sha[:12]}...")
+        checkout_in_container(pinned_sha)
+        handle_issues(candidate_sha, False, None, False, False)
         sys.exit(1)
 
+    # Full test
     full_ok = run_test("Full Integration Test", FULL)
     if not full_ok:
         print("\n❌ Full test failed.")
-        handle_issues(container_sha, True, False, False, False)
+        print(f"[INFO] Reverting container to pinned SHA {pinned_sha[:12]}...")
+        checkout_in_container(pinned_sha)
+        handle_issues(candidate_sha, True, False, False, False)
         sys.exit(1)
 
-    print("\n✅ All tests passed.")
-    commit_metadata(container_sha)
+    # Both passed — promote candidate to pinned
+    print("\n✅ All tests passed. Promoting candidate to pinned.")
+    commit_metadata(candidate_sha)
 
     pushed = args.push and git_push()
-    handle_issues(container_sha, True, True, True, pushed)
+    handle_issues(candidate_sha, True, True, True, pushed)
 
     if pushed:
-        print("\n=== Verification Complete (committed + pushed) ===")
+        print("\n=== Verification Complete (pinned + pushed) ===")
     else:
-        print("\n=== Verification Complete (committed locally) ===")
+        print("\n=== Verification Complete (pinned locally) ===")
         if not args.push:
             print("Run with --push to also push, or: git push")
 
