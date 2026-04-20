@@ -214,8 +214,9 @@ def setup_check():
 
 @app.post("/ensure-repo-exists")
 def ensure_repo_exists():
-    # ── Read the pinned (approved) upstream SHA ──────────────────────────────
+    # ── 1. Read the pinned (approved) upstream SHA ──────────────────────────────
     pinned_sha = None
+    # Use /app prefix as the metadata file is mounted there in the container
     upstream_meta = Path("/app/.upstream-sha.json")
     if upstream_meta.is_file():
         import json
@@ -224,14 +225,44 @@ def ensure_repo_exists():
         except (json.JSONDecodeError, KeyError):
             pass
 
+    # ── 2. Handle Repo Exists: Ensure Alignment ─────────────────────────────
     if MLC_CLI_PATH.exists():
-        return {
-            "status": "ok",
-            "message": "mlc-cli already exists",
-            "path": str(MLC_CLI_PATH),
-            "pinned_sha": pinned_sha,
-        }
+        try:
+            # Get the actual SHA of the repo currently on disk
+            r = run_git(["rev-parse", "HEAD"], cwd=MLC_CLI_PATH)
+            current_sha = r.stdout.strip()
 
+            # If we have a pin and it doesn't match, re-align
+            if pinned_sha and current_sha != pinned_sha:
+                print(f"[INFO] mlc-cli exists at {current_sha[:12]}, but pinned is {pinned_sha[:12]}. Re-aligning...")
+                run_git(["fetch", "origin"], cwd=MLC_CLI_PATH)
+                run_git(["checkout", pinned_sha], cwd=MLC_CLI_PATH)
+                return {
+                    "status": "ok",
+                    "message": f"mlc-cli re-aligned to pinned SHA {pinned_sha[:12]}",
+                    "path": str(MLC_CLI_PATH),
+                    "pinned_sha": pinned_sha,
+                    "previous_sha": current_sha,
+                    "action": "re-aligned",
+                }
+
+            return {
+                "status": "ok",
+                "message": "mlc-cli already exists and is aligned" if pinned_sha else "mlc-cli exists (no pinning active)",
+                "path": str(MLC_CLI_PATH),
+                "pinned_sha": pinned_sha,
+                "current_sha": current_sha,
+                "action": "already-aligned" if pinned_sha else "none",
+            }
+        except subprocess.CalledProcessError as exc:
+            return {
+                "status": "error",
+                "message": "mlc-cli exists but failed to verify/align SHA",
+                "path": str(MLC_CLI_PATH),
+                "stderr": exc.stderr.strip(),
+            }
+
+    # ── 3. Handle Repo Missing: Clone + Pin ──────────────────────────────
     print(f"[INFO] Cloning {MLC_CLI_URL} into {MLC_CLI_PATH}...")
     try:
         run_git(["clone", MLC_CLI_URL, str(MLC_CLI_PATH)])
@@ -243,9 +274,10 @@ def ensure_repo_exists():
 
         return {
             "status": "ok",
-            "message": "mlc-cli cloned successfully",
+            "message": f"mlc-cli cloned and pinned to {pinned_sha[:12]}" if pinned_sha else "mlc-cli cloned (HEAD)",
             "path": str(MLC_CLI_PATH),
             "pinned_sha": pinned_sha,
+            "action": "cloned",
         }
     except subprocess.CalledProcessError as exc:
         return {

@@ -40,7 +40,7 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 | `GET`  | `/health`             | Service health check                                        |
 | `GET`  | `/setup-check`        | Inspect repo, Go, Conda, nvidia-smi, and nvcc               |
 | `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes |
-| `POST` | `/ensure-repo-exists` | Clone `mlc-cli` repo into `/workspace/mlc-cli` if absent    |
+| `POST` | `/ensure-repo-exists` | Clone or re-align `mlc-cli` repo to the pinned approved SHA |
 | `GET`  | `/artifacts`          | List locally built wheels, converted models, and compiled libs|
 
 ### Pipeline
