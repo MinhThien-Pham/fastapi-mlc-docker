@@ -10,12 +10,14 @@ Functions
 ---------
 detect_known_failure   – detect known build-log failure signatures
 run_tool_check         – thin wrapper around subprocess for tool availability
+get_repo_alignment     – local-only check of current vs pinned SHA
 build_mlc_cli_command  – construct ``go run . build`` argv list
 build_convert_command  – construct ``go run . quantize`` argv list
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -94,6 +96,89 @@ def run_tool_check(command: list[str]) -> dict[str, Any]:
         return {"available": False, "output": "command not found", "returncode": -1}
     except subprocess.TimeoutExpired:
         return {"available": False, "output": "timed out", "returncode": -1}
+
+
+# ── Repo Alignment logic ──────────────────────────────────────────────────────
+
+def get_repo_alignment(repo_path: Path, metadata_path: Path) -> dict[str, Any]:
+    """Determine the relationship between the local repo and the pinned metadata.
+
+    This is a local-only inspection (no network fetch).
+
+    Returns
+    -------
+    dict with keys:
+        exists (bool)      – True if repo_path exists
+        pinned_sha (str)   – SHA from metadata_path (or None)
+        current_sha (str)  – HEAD SHA from repo (or None)
+        relation (str)     – "match" | "ahead" | "behind" | "diverged" | "missing" | "unknown"
+    """
+    res: dict[str, Any] = {
+        "exists": repo_path.exists(),
+        "pinned_sha": None,
+        "current_sha": None,
+        "relation": "unknown",
+    }
+
+    # 1. Read pinned SHA from metadata
+    if metadata_path.is_file():
+        try:
+            res["pinned_sha"] = json.loads(metadata_path.read_text()).get("pinned_sha")
+        except Exception:
+            pass
+
+    if not res["exists"]:
+        res["relation"] = "missing"
+        return res
+
+    # 2. Get current HEAD SHA
+    r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True
+    )
+    if r.returncode != 0:
+        # Not a git repo or other git error
+        return res
+    res["current_sha"] = r.stdout.strip()
+
+    pinned = res["pinned_sha"]
+    current = res["current_sha"]
+
+    # If we have a repo but no pinned SHA to compare against, it's just "exists"
+    if not pinned or not current:
+        return res
+
+    if pinned == current:
+        res["relation"] = "match"
+        return res
+
+    # 3. Determine ancestry (local-only)
+    def is_ancestor(a: str, b: str) -> bool:
+        return subprocess.run(
+            ["git", "merge-base", "--is-ancestor", a, b],
+            cwd=repo_path
+        ).returncode == 0
+
+    try:
+        # Is pinned an ancestor of current? (current is ahead of pinned)
+        if is_ancestor(pinned, current):
+            res["relation"] = "ahead"
+            return res
+
+        # Is current an ancestor of pinned? (current is behind pinned)
+        if is_ancestor(current, pinned):
+            res["relation"] = "behind"
+            return res
+
+        # Neither is ancestor -> diverged
+        res["relation"] = "diverged"
+    except Exception:
+        # e.g. pinned SHA not present in local history
+        pass
+
+    return res
 
 
 # ── Build command construction ────────────────────────────────────────────────

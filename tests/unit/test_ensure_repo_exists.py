@@ -22,7 +22,8 @@ def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
 class TestEnsureRepoExists:
     
     @patch("app.main.run_git")
-    def test_repo_missing_no_pin_clones_head(self, mock_git, client, monkeypatch, tmp_path):
+    @patch("subprocess.run")
+    def test_repo_missing_no_pin_clones_head(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo missing, no pinned SHA in metadata -> clones HEAD."""
         monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
         
@@ -41,7 +42,8 @@ class TestEnsureRepoExists:
         assert "clone" in mock_git.call_args[0][0]
 
     @patch("app.main.run_git")
-    def test_repo_missing_with_pin_clones_and_checkouts(self, mock_git, client, monkeypatch, tmp_path):
+    @patch("subprocess.run")
+    def test_repo_missing_with_pin_clones_and_checkouts(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo missing, pinned SHA present -> clones then checkouts pin."""
         pinned_sha = "pinned123456789"
         monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
@@ -75,7 +77,8 @@ class TestEnsureRepoExists:
         assert pinned_sha in calls[1]
 
     @patch("app.main.run_git")
-    def test_repo_exists_already_aligned(self, mock_git, client, monkeypatch, tmp_path):
+    @patch("subprocess.run")
+    def test_repo_exists_already_aligned(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists and current SHA matches pinned SHA -> no-op."""
         pinned_sha = "pinned123"
         fake_repo = tmp_path / "mlc-cli"
@@ -94,7 +97,7 @@ class TestEnsureRepoExists:
             return original_path(p)
             
         with patch("app.main.Path", side_effect=mocked_path):
-            mock_git.return_value = _proc(stdout=pinned_sha)
+            mock_sub.return_value = _proc(stdout=pinned_sha)
             resp = client.post("/ensure-repo-exists")
             
         assert resp.status_code == 200
@@ -102,12 +105,13 @@ class TestEnsureRepoExists:
         assert data["action"] == "already-aligned"
         assert "already exists and is aligned" in data["message"]
         
-        # Only one git call (rev-parse)
-        mock_git.assert_called_once()
-        assert "rev-parse" in mock_git.call_args[0][0]
+        # get_repo_alignment uses subprocess.run for rev-parse
+        mock_sub.assert_called_once()
+        assert "rev-parse" in mock_sub.call_args[0][0]
 
     @patch("app.main.run_git")
-    def test_repo_exists_misaligned_triggers_realignment(self, mock_git, client, monkeypatch, tmp_path):
+    @patch("subprocess.run")
+    def test_repo_exists_misaligned_triggers_realignment(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists but SHA differs -> fetches and checkouts pin."""
         pinned_sha = "pinned123"
         current_sha = "old456"
@@ -127,9 +131,14 @@ class TestEnsureRepoExists:
             return original_path(p)
             
         with patch("app.main.Path", side_effect=mocked_path):
-            # Mock sequence of git calls
-            mock_git.side_effect = [
+            # Mock subprocess for get_repo_alignment
+            mock_sub.side_effect = [
                 _proc(stdout=current_sha), # rev-parse
+                _proc(returncode=1),       # is-ancestor pinned current (not ahead)
+                _proc(returncode=1),       # is-ancestor current pinned (not behind -> diverged)
+            ]
+            # Mock run_git for re-alignment
+            mock_git.side_effect = [
                 _proc(),                   # fetch
                 _proc()                    # checkout
             ]
@@ -141,15 +150,15 @@ class TestEnsureRepoExists:
         assert pinned_sha[:12] in data["message"]
         assert data["previous_sha"] == current_sha
         
-        assert mock_git.call_count == 3
+        assert mock_git.call_count == 2
         calls = [c[0][0] for c in mock_git.call_args_list]
-        assert "rev-parse" in calls[0]
-        assert "fetch" in calls[1]
-        assert "checkout" in calls[2]
-        assert pinned_sha in calls[2]
+        assert "fetch" in calls[0]
+        assert "checkout" in calls[1]
+        assert pinned_sha in calls[1]
 
     @patch("app.main.run_git")
-    def test_repo_exists_no_pin_fallback(self, mock_git, client, monkeypatch, tmp_path):
+    @patch("subprocess.run")
+    def test_repo_exists_no_pin_fallback(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists, no pinning active -> returns success with warning."""
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
@@ -157,11 +166,12 @@ class TestEnsureRepoExists:
         
         # Mock metadata file missing
         with patch("pathlib.Path.is_file", return_value=False):
-            mock_git.return_value = _proc(stdout="some-sha")
+            mock_sub.return_value = _proc(stdout="some-sha")
             resp = client.post("/ensure-repo-exists")
             
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "none"
         assert "no pinning active" in data["message"]
-        mock_git.assert_called_once()
+        # run_git is not called when already aligned/no pin
+        assert mock_git.call_count == 0
