@@ -294,31 +294,74 @@ def ensure_repo_exists():
 
 @app.get("/repo-status")
 def repo_status():
-    """Check if the mlc-cli repository is clean or dirty (has uncommitted changes)."""
-    if not MLC_CLI_PATH.exists():
-        return {
-            "status": "error",
-            "message": "mlc-cli repo not found",
-            "repo_exists": False,
-        }
+    """Check both the git dirty state and the alignment with pinned upstream SHA."""
+    # ── 1. Alignment check (local-only foundation) ──────────────────────────
+    upstream_meta = Path("/app/.upstream-sha.json")
+    align = get_repo_alignment(MLC_CLI_PATH, upstream_meta)
 
-    result = run_command(["git", "status", "--porcelain"], cwd=MLC_CLI_PATH)
-    if result.returncode != 0:
-        return {
-            "status": "error",
-            "message": "failed to check git status",
-            "stderr": result.stderr.strip(),
-        }
+    # ── 2. Git status check (dirtyness) ──────────────────────────────────────
+    is_clean = True
+    git_status_msg = "mlc-cli repo not found"
+    changes = []
 
-    status_output = result.stdout.strip()
-    is_clean = len(status_output) == 0
+    if align["exists"]:
+        result = run_command(["git", "status", "--porcelain"], cwd=MLC_CLI_PATH)
+        if result.returncode == 0:
+            status_output = result.stdout.strip()
+            is_clean = len(status_output) == 0
+            git_status_msg = "Repository is clean" if is_clean else "Repository has uncommitted changes"
+            changes = status_output.split("\n") if status_output else []
+        else:
+            git_status_msg = f"failed to check git status: {result.stderr.strip()}"
+            is_clean = False
+
+    # ── 3. Alignment human messaging ─────────────────────────────────────────
+    rel = align["relation"]
+    pinned = align["pinned_sha"]
+    current = align["current_sha"]
+
+    if rel == "match":
+        align_msg = f"Aligned with pinned SHA {pinned[:12]}"
+    elif rel == "ahead":
+        align_msg = f"Ahead of pinned SHA (pinned: {pinned[:12]}, local: {current[:12]})"
+    elif rel == "behind":
+        align_msg = f"Behind pinned SHA (pinned: {pinned[:12]}, local: {current[:12]})"
+    elif rel == "diverged":
+        align_msg = f"Diverged from pinned SHA {pinned[:12]}"
+    elif rel == "missing":
+        align_msg = "Repository missing"
+    elif rel == "unpinned":
+        align_msg = "No pinning active"
+    else:
+        align_msg = "Alignment unknown"
+
+    # ── 4. Derive overall health status ──────────────────────────────────────
+    if not align["exists"]:
+        status = "missing"
+    elif rel == "unknown":
+        status = "unknown"
+    elif is_clean and rel in ("match", "unpinned"):
+        status = "healthy"
+    else:
+        status = "degraded"
+
+    # ── 5. Tighten repair_possible ───────────────────────────────────────────
+    # A repair/re-alignment is meaningful if we have a target pinned SHA
+    # and we are not already matched.
+    repair_possible = pinned is not None and rel in ("ahead", "behind", "diverged", "missing", "unpinned")
 
     return {
-        "status": "ok",
-        "repo_exists": True,
-        "is_clean": is_clean,
-        "message": "Repository is clean" if is_clean else "Repository has uncommitted changes",
-        "changes": status_output.split("\n") if status_output else [],
+        "status": status,
+        "is_clean": is_clean if align["exists"] else None,
+        "message": f"{git_status_msg}. {align_msg}.",
+        "alignment": {
+            "pinned_sha": pinned,
+            "current_sha": current,
+            "relation": rel,
+            "repair_possible": repair_possible,
+            "message": align_msg,
+        },
+        "changes": changes,
     }
 
 

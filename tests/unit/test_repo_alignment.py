@@ -43,7 +43,7 @@ class TestGetRepoAlignment:
         assert res["exists"] is True
         assert res["pinned_sha"] is None
         assert res["current_sha"] == "sha123"
-        assert res["relation"] == "unknown"
+        assert res["relation"] == "unpinned"
 
     def test_exact_match(self, tmp_path):
         """Relationship is 'match' if current SHA == pinned SHA."""
@@ -130,7 +130,7 @@ class TestGetRepoAlignment:
             mock_run.return_value = _proc(stdout="sha123")
             res = get_repo_alignment(repo, meta)
             
-        assert res["relation"] == "unknown"
+        assert res["relation"] == "unpinned"
         assert res["pinned_sha"] is None
 
     def test_not_a_git_repo_returns_unknown(self, tmp_path):

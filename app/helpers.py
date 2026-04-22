@@ -139,15 +139,21 @@ def get_repo_alignment(repo_path: Path, metadata_path: Path) -> dict[str, Any]:
         text=True
     )
     if r.returncode != 0:
-        # Not a git repo or other git error
+        # Not a git repo or other git error: this is a true unknown
+        res["relation"] = "unknown"
         return res
     res["current_sha"] = r.stdout.strip()
 
     pinned = res["pinned_sha"]
     current = res["current_sha"]
 
-    # If we have a repo but no pinned SHA to compare against, it's just "exists"
-    if not pinned or not current:
+    # If we have a repo but no pinned SHA to compare against
+    if not pinned:
+        res["relation"] = "unpinned"
+        return res
+
+    if not current:
+        res["relation"] = "unknown"
         return res
 
     if pinned == current:
