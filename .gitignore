@@ -29,3 +29,6 @@ build/
 
 # Project-specific
 mlc-cli/
+
+# Raw model cache
+.raw_model_cache/
