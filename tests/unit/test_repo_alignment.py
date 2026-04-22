@@ -61,6 +61,20 @@ class TestGetRepoAlignment:
         assert res["current_sha"] == sha
         assert res["pinned_sha"] == sha
 
+    @patch("app.helpers.try_restore_metadata")
+    @patch("app.helpers.subprocess.run")
+    def test_auto_restore_triggers_helper(self, mock_run, mock_restore, tmp_path):
+        """get_repo_alignment calls try_restore_metadata when auto_restore=True."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        meta = tmp_path / ".upstream-sha.json"
+        
+        mock_run.return_value = _proc(stdout="sha123")
+        
+        from app.helpers import get_repo_alignment
+        get_repo_alignment(repo, meta, auto_restore=True)
+        mock_restore.assert_called_once_with(meta)
+
     def test_ahead(self, tmp_path):
         """Relationship is 'ahead' if pinned is an ancestor of current."""
         repo = tmp_path / "repo"

@@ -8,7 +8,9 @@ which keeps them fast and pinpoints failures precisely.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +21,7 @@ from app.helpers import (
     build_mlc_cli_command,
     detect_known_failure,
     run_tool_check,
+    try_restore_metadata,
 )
 from app.main import BuildRequest
 
@@ -204,3 +207,61 @@ class TestBuildMlcCliCommand:
         cmd = build_mlc_cli_command(self._req())
         assert isinstance(cmd, list)
         assert all(isinstance(item, str) for item in cmd)
+
+
+# ── try_restore_metadata ──────────────────────────────────────────────────────
+
+class TestTryRestoreMetadata:
+    """try_restore_metadata(metadata_path) → bool success."""
+
+    @patch("app.helpers.subprocess.run")
+    def test_missing_file_restores(self, mock_run, tmp_path):
+        """If file is missing, calls git checkout and returns True if file appears."""
+        meta = tmp_path / ".upstream-sha.json"
+        
+        def fake_git(cmd, **kwargs):
+            meta.write_text(json.dumps({"pinned_sha": "restored"}))
+            return MagicMock(returncode=0)
+        mock_run.side_effect = fake_git
+        
+        result = try_restore_metadata(meta)
+        assert result is True
+        assert json.loads(meta.read_text())["pinned_sha"] == "restored"
+        mock_run.assert_called_once()
+
+    @patch("app.helpers.subprocess.run")
+    def test_malformed_file_restores(self, mock_run, tmp_path):
+        """If file is malformed JSON, calls git checkout and returns True if fixed."""
+        meta = tmp_path / ".upstream-sha.json"
+        meta.write_text("not json")
+        
+        def fake_git(cmd, **kwargs):
+            meta.write_text(json.dumps({"pinned_sha": "restored"}))
+            return MagicMock(returncode=0)
+        mock_run.side_effect = fake_git
+        
+        result = try_restore_metadata(meta)
+        assert result is True
+        assert json.loads(meta.read_text())["pinned_sha"] == "restored"
+        mock_run.assert_called_once()
+
+    @patch("app.helpers.subprocess.run")
+    def test_valid_file_not_restored(self, mock_run, tmp_path):
+        """If file is valid, does nothing and returns True."""
+        meta = tmp_path / ".upstream-sha.json"
+        meta.write_text(json.dumps({"pinned_sha": "current"}))
+        
+        result = try_restore_metadata(meta)
+        assert result is True
+        assert json.loads(meta.read_text())["pinned_sha"] == "current"
+        mock_run.assert_not_called()
+
+    @patch("app.helpers.subprocess.run")
+    def test_recovery_fails(self, mock_run, tmp_path):
+        """If git checkout fails and file remains missing, returns False."""
+        meta = tmp_path / ".upstream-sha.json"
+        mock_run.return_value = MagicMock(returncode=1)
+        
+        result = try_restore_metadata(meta)
+        assert result is False
+        assert not meta.exists()

@@ -43,9 +43,24 @@ def commits_ahead_of_remote():
 def preflight(want_push=False):
     print("=== Preflight Checks ===\n")
 
+    # 1. Metadata self-recovery
     if not METADATA.is_file():
-        die(f"{METADATA} not found")
-    print("  ✓ Metadata file exists")
+        print(f"  ! {METADATA} missing, attempting recovery from git...")
+        sh(["git", "checkout", "--", str(METADATA)])
+    else:
+        try:
+            json.loads(METADATA.read_text())
+        except Exception:
+            print(f"  ! {METADATA} malformed, attempting recovery from git...")
+            sh(["git", "checkout", "--", str(METADATA)])
+
+    if not METADATA.is_file():
+        die(f"{METADATA} not found and recovery failed")
+    try:
+        json.loads(METADATA.read_text())
+    except Exception:
+        die(f"{METADATA} is malformed and recovery failed")
+    print("  ✓ Metadata file exists and is valid")
 
     r = sh(["docker", "compose", "ps", "--status", "running", "--format", "{{.Name}}"])
     if r.returncode != 0 or "web" not in r.stdout:

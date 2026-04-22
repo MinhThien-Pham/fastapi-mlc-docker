@@ -220,13 +220,13 @@ def setup_check():
         "warnings": warnings,
     }
 
-
 @app.post("/ensure-repo-exists")
 def ensure_repo_exists():
     # ── 1. Determine local alignment ──────────────────────────────────────────
     # Path inside container for metadata
     upstream_meta = Path("/app/.upstream-sha.json")
-    align = get_repo_alignment(MLC_CLI_PATH, upstream_meta)
+    # In this repair-oriented flow, we attempt self-recovery of metadata if missing
+    align = get_repo_alignment(MLC_CLI_PATH, upstream_meta, auto_restore=True)
 
     pinned_sha = align["pinned_sha"]
     current_sha = align["current_sha"]

@@ -100,7 +100,46 @@ def run_tool_check(command: list[str]) -> dict[str, Any]:
 
 # ── Repo Alignment logic ──────────────────────────────────────────────────────
 
-def get_repo_alignment(repo_path: Path, metadata_path: Path) -> dict[str, Any]:
+def try_restore_metadata(metadata_path: Path) -> bool:
+    """Attempt to restore the metadata file from the local git repo if missing or malformed.
+
+    Returns True if the file exists and is valid JSON after the attempt.
+    """
+    needs_restore = False
+
+    if not metadata_path.is_file():
+        needs_restore = True
+    else:
+        try:
+            with open(metadata_path, 'r') as f:
+                json.load(f)
+        except (json.JSONDecodeError, IOError):
+            needs_restore = True
+
+    if needs_restore:
+        try:
+            # Try to restore from git.
+            subprocess.run(
+                ["git", "checkout", "--", metadata_path.name],
+                cwd=metadata_path.parent,
+                capture_output=True,
+                check=True
+            )
+        except Exception:
+            pass
+
+    # Final validation
+    if not metadata_path.is_file():
+        return False
+    try:
+        with open(metadata_path, 'r') as f:
+            json.load(f)
+        return True
+    except Exception:
+        return False
+
+
+def get_repo_alignment(repo_path: Path, metadata_path: Path, auto_restore: bool = False) -> dict[str, Any]:
     """Determine the relationship between the local repo and the pinned metadata.
 
     This is a local-only inspection (no network fetch).
@@ -111,7 +150,7 @@ def get_repo_alignment(repo_path: Path, metadata_path: Path) -> dict[str, Any]:
         exists (bool)      – True if repo_path exists
         pinned_sha (str)   – SHA from metadata_path (or None)
         current_sha (str)  – HEAD SHA from repo (or None)
-        relation (str)     – "match" | "ahead" | "behind" | "diverged" | "missing" | "unknown"
+        relation (str)     – "match" | "ahead" | "behind" | "diverged" | "missing" | "unpinned" | "unknown"
     """
     res: dict[str, Any] = {
         "exists": repo_path.exists(),
@@ -120,11 +159,15 @@ def get_repo_alignment(repo_path: Path, metadata_path: Path) -> dict[str, Any]:
         "relation": "unknown",
     }
 
-    # 1. Read pinned SHA from metadata
+    # 1. Read pinned SHA from metadata (with optional self-recovery)
+    if auto_restore:
+        try_restore_metadata(metadata_path)
+
     if metadata_path.is_file():
         try:
             res["pinned_sha"] = json.loads(metadata_path.read_text()).get("pinned_sha")
         except Exception:
+            # Exists but unreadable: if we already tried restore and failed, this is unknown
             pass
 
     if not res["exists"]:
