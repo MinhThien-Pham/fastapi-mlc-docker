@@ -16,6 +16,7 @@ Usage:
 import argparse, json, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
+from app.helpers import try_restore_metadata
 
 METADATA = Path(".upstream-sha.json")
 RECOVERY_MARKER = Path(".upstream-verify-recovery.json")
@@ -44,22 +45,8 @@ def preflight(want_push=False):
     print("=== Preflight Checks ===\n")
 
     # 1. Metadata self-recovery
-    if not METADATA.is_file():
-        print(f"  ! {METADATA} missing, attempting recovery from git...")
-        sh(["git", "checkout", "--", str(METADATA)])
-    else:
-        try:
-            json.loads(METADATA.read_text())
-        except Exception:
-            print(f"  ! {METADATA} malformed, attempting recovery from git...")
-            sh(["git", "checkout", "--", str(METADATA)])
-
-    if not METADATA.is_file():
-        die(f"{METADATA} not found and recovery failed")
-    try:
-        json.loads(METADATA.read_text())
-    except Exception:
-        die(f"{METADATA} is malformed and recovery failed")
+    if not try_restore_metadata(METADATA):
+        die(f"{METADATA} missing or malformed and recovery failed")
     print("  ✓ Metadata file exists and is valid")
 
     r = sh(["docker", "compose", "ps", "--status", "running", "--format", "{{.Name}}"])

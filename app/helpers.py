@@ -111,9 +111,8 @@ def try_restore_metadata(metadata_path: Path) -> bool:
         needs_restore = True
     else:
         try:
-            with open(metadata_path, 'r') as f:
-                json.load(f)
-        except (json.JSONDecodeError, IOError):
+            json.loads(metadata_path.read_text())
+        except (json.JSONDecodeError, IOError, Exception):
             needs_restore = True
 
     if needs_restore:
@@ -132,8 +131,7 @@ def try_restore_metadata(metadata_path: Path) -> bool:
     if not metadata_path.is_file():
         return False
     try:
-        with open(metadata_path, 'r') as f:
-            json.load(f)
+        json.loads(metadata_path.read_text())
         return True
     except Exception:
         return False
