@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Literal
 
@@ -17,10 +18,27 @@ from app.helpers import (
     detect_known_failure,
     discover_artifacts,
     get_repo_alignment,
+    get_startup_alignment_message,
     run_tool_check,
 )
 
-app = FastAPI(title="FastAPI MLC-CLI")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup: Log-only Local Alignment Check ───────────────────────────────
+    # Perform a lightweight check of the Bryan mlc-cli repo state.
+    # This is local-only and does not fetch or repair.
+    try:
+        upstream_meta = Path("/app/.upstream-sha.json")
+        align = get_repo_alignment(MLC_CLI_PATH, upstream_meta)
+        msg = get_startup_alignment_message(align)
+        print(f"[BOOT] {msg}")
+    except Exception as e:
+        print(f"[BOOT] Failed to perform startup repo alignment check: {e}")
+
+    yield
+
+
+app = FastAPI(title="FastAPI MLC-CLI", lifespan=lifespan)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 MLC_CLI_PATH = Path("/workspace/mlc-cli")

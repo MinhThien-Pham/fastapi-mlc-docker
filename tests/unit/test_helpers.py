@@ -20,6 +20,7 @@ from app.helpers import (
     KNOWN_FAILURE_SIGNATURES,
     build_mlc_cli_command,
     detect_known_failure,
+    get_startup_alignment_message,
     run_tool_check,
     try_restore_metadata,
 )
@@ -265,3 +266,48 @@ class TestTryRestoreMetadata:
         result = try_restore_metadata(meta)
         assert result is False
         assert not meta.exists()
+
+
+# ── get_startup_alignment_message ─────────────────────────────────────────────
+
+class TestGetStartupAlignmentMessage:
+    """get_startup_alignment_message(align) → str."""
+
+    def test_match(self):
+        align = {"relation": "match", "pinned_sha": "sha123", "current_sha": "sha123"}
+        msg = get_startup_alignment_message(align)
+        assert "aligned" in msg
+        assert "sha123" in msg
+
+    def test_ahead(self):
+        align = {"relation": "ahead", "pinned_sha": "sha_old", "current_sha": "sha_new"}
+        msg = get_startup_alignment_message(align)
+        assert "AHEAD" in msg
+        assert "verify_upstream.py" in msg
+
+    def test_behind(self):
+        align = {"relation": "behind", "pinned_sha": "sha_new", "current_sha": "sha_old"}
+        msg = get_startup_alignment_message(align)
+        assert "BEHIND" in msg
+        assert "/ensure-repo-exists" in msg
+
+    def test_diverged(self):
+        align = {"relation": "diverged", "pinned_sha": "sha_a", "current_sha": "sha_b"}
+        msg = get_startup_alignment_message(align)
+        assert "DIVERGED" in msg
+        assert "manual inspection" in msg
+
+    def test_missing(self):
+        align = {"relation": "missing", "pinned_sha": "sha123", "current_sha": None}
+        msg = get_startup_alignment_message(align)
+        assert "MISSING" in msg
+
+    def test_unpinned(self):
+        align = {"relation": "unpinned", "pinned_sha": None, "current_sha": "sha123"}
+        msg = get_startup_alignment_message(align)
+        assert "no pinning metadata is active" in msg
+
+    def test_unknown(self):
+        align = {"relation": "unknown", "pinned_sha": "sha123", "current_sha": None}
+        msg = get_startup_alignment_message(align)
+        assert "UNKNOWN" in msg

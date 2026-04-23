@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 # ── Known build-failure signatures ────────────────────────────────────────────
@@ -201,31 +201,55 @@ def get_repo_alignment(repo_path: Path, metadata_path: Path, auto_restore: bool 
         res["relation"] = "match"
         return res
 
-    # 3. Determine ancestry (local-only)
-    def is_ancestor(a: str, b: str) -> bool:
-        return subprocess.run(
-            ["git", "merge-base", "--is-ancestor", a, b],
-            cwd=repo_path
-        ).returncode == 0
+    # 4. Check ancestry
+    # Is pinned an ancestor of current? (ahead)
+    r = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", pinned, current],
+        cwd=repo_path,
+        capture_output=True
+    )
+    if r.returncode == 0:
+        res["relation"] = "ahead"
+        return res
 
-    try:
-        # Is pinned an ancestor of current? (current is ahead of pinned)
-        if is_ancestor(pinned, current):
-            res["relation"] = "ahead"
-            return res
+    # Is current an ancestor of pinned? (behind)
+    r = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", current, pinned],
+        cwd=repo_path,
+        capture_output=True
+    )
+    if r.returncode == 0:
+        res["relation"] = "behind"
+        return res
 
-        # Is current an ancestor of pinned? (current is behind pinned)
-        if is_ancestor(current, pinned):
-            res["relation"] = "behind"
-            return res
-
-        # Neither is ancestor -> diverged
-        res["relation"] = "diverged"
-    except Exception:
-        # e.g. pinned SHA not present in local history
-        pass
-
+    # Neither is an ancestor of the other
+    res["relation"] = "diverged"
     return res
+
+
+def get_startup_alignment_message(align: dict[str, Any]) -> str:
+    """Translate repo alignment into a clear human-readable startup log message."""
+    rel = align["relation"]
+    pinned = align["pinned_sha"]
+    current = align["current_sha"]
+
+    if rel == "match":
+        return f"Bryan mlc-cli repo is aligned with pinned SHA {pinned[:12]}"
+    elif rel == "ahead":
+        return (f"Bryan mlc-cli repo is AHEAD of pinned SHA (pinned: {pinned[:12]}, local: {current[:12]}). "
+                "Recommend running 'verify_upstream.py' if this was intentional.")
+    elif rel == "behind":
+        return (f"Bryan mlc-cli repo is BEHIND pinned SHA {pinned[:12]} (local: {current[:12]}). "
+                "Use POST /ensure-repo-exists to re-align.")
+    elif rel == "diverged":
+        return (f"Bryan mlc-cli repo has DIVERGED from pinned SHA {pinned[:12]}. "
+                "Recommend manual inspection or repair via POST /ensure-repo-exists.")
+    elif rel == "missing":
+        return "Bryan mlc-cli repo is MISSING. Use POST /ensure-repo-exists to clone and align it."
+    elif rel == "unpinned":
+        return "Bryan mlc-cli repo exists but no pinning metadata is active."
+    else:
+        return "Bryan mlc-cli repo status is UNKNOWN (failed to inspect Git state)."
 
 
 # ── Build command construction ────────────────────────────────────────────────
