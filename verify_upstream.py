@@ -16,7 +16,7 @@ Usage:
 import argparse, json, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
-from app.helpers import try_restore_metadata
+from app.helpers import get_git_dirty_state, restore_tracked_changes, try_restore_metadata
 
 METADATA = Path(".upstream-sha.json")
 RECOVERY_MARKER = Path(".upstream-verify-recovery.json")
@@ -44,7 +44,20 @@ def commits_ahead_of_remote():
 def preflight(want_push=False):
     print("=== Preflight Checks ===\n")
 
-    # 1. Metadata self-recovery
+    # 1. Restore tracked Bryan repo changes before any recovery or network work
+    dirty = get_git_dirty_state(Path("/workspace/mlc-cli"))
+    if dirty["exists"] and dirty["tracked_dirty"]:
+        cleanup = restore_tracked_changes(Path("/workspace/mlc-cli"))
+        if not cleanup["ok"]:
+            detail = cleanup["error"] or "failed to restore tracked changes"
+            die(
+                "Managed Bryan repo at /workspace/mlc-cli has tracked source modifications and cleanup failed. "
+                "Verification is unsafe until tracked code is clean. "
+                f"Details: {detail}"
+            )
+        print("  ✓ Tracked Bryan repo files restored to current checked-out commit")
+
+    # 2. Metadata self-recovery
     if not try_restore_metadata(METADATA):
         die(f"{METADATA} missing or malformed and recovery failed")
     print("  ✓ Metadata file exists and is valid")

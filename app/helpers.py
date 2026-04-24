@@ -98,6 +98,108 @@ def run_tool_check(command: list[str]) -> dict[str, Any]:
         return {"available": False, "output": "timed out", "returncode": -1}
 
 
+# ── Git working-tree state ───────────────────────────────────────────────────
+
+def get_git_dirty_state(repo_path: Path) -> dict[str, Any]:
+    """Inspect *repo_path* and split tracked dirty state from untracked files.
+
+    For managed Bryan repo policy, only tracked-file modifications are treated
+    as unsafe source-code drift. Untracked artifacts/caches are reported, but
+    are not considered tracked dirty state.
+    """
+    result: dict[str, Any] = {
+        "exists": repo_path.exists(),
+        "tracked_dirty": False,
+        "tracked_changes": [],
+        "untracked_files": [],
+        "error": None,
+    }
+
+    if not result["exists"]:
+        return result
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        result["tracked_dirty"] = True
+        result["error"] = status.stderr.strip() or status.stdout.strip() or "git status failed"
+        return result
+
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for raw in status.stdout.splitlines():
+        line = raw.strip("\n")
+        if not line:
+            continue
+        if line.startswith("?? "):
+            untracked.append(line[3:])
+        elif line.startswith("!! "):
+            # Ignored files are irrelevant for managed source-code cleanliness.
+            continue
+        else:
+            tracked.append(line)
+
+    result["tracked_changes"] = tracked
+    result["untracked_files"] = untracked
+    result["tracked_dirty"] = bool(tracked)
+    return result
+
+
+def restore_tracked_changes(repo_path: Path) -> dict[str, Any]:
+    """Restore tracked files in *repo_path* to the current checked-out commit.
+
+    This intentionally does not delete untracked files and does not change the
+    checked-out commit. It only resets tracked file content/index state.
+    """
+    before = get_git_dirty_state(repo_path)
+    result: dict[str, Any] = {
+        "ok": True,
+        "restored": False,
+        "before": before,
+        "after": before,
+        "error": None,
+    }
+
+    if not before["exists"]:
+        return result
+
+    if before["error"]:
+        result["ok"] = False
+        result["error"] = before["error"]
+        return result
+
+    if not before["tracked_dirty"]:
+        return result
+
+    restore = subprocess.run(
+        ["git", "restore", "--staged", "--worktree", "--", "."],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if restore.returncode != 0:
+        result["ok"] = False
+        result["error"] = restore.stderr.strip() or restore.stdout.strip() or "git restore failed"
+        return result
+
+    after = get_git_dirty_state(repo_path)
+    result["after"] = after
+    result["restored"] = True
+    if after["error"]:
+        result["ok"] = False
+        result["error"] = after["error"]
+    elif after["tracked_dirty"]:
+        result["ok"] = False
+        sample = ", ".join(after["tracked_changes"][:5])
+        result["error"] = f"tracked changes remain after restore: {sample}"
+
+    return result
+
+
 # ── Repo Alignment logic ──────────────────────────────────────────────────────
 
 def try_restore_metadata(metadata_path: Path) -> bool:
@@ -185,6 +287,7 @@ def get_repo_alignment(repo_path: Path, metadata_path: Path, auto_restore: bool 
         return res
     res["current_sha"] = r.stdout.strip()
 
+    # 3. Determine alignment relation
     pinned = res["pinned_sha"]
     current = res["current_sha"]
 

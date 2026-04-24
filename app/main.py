@@ -17,8 +17,10 @@ from app.helpers import (
     build_run_command,
     detect_known_failure,
     discover_artifacts,
+    get_git_dirty_state,
     get_repo_alignment,
     get_startup_alignment_message,
+    restore_tracked_changes,
     run_tool_check,
 )
 
@@ -240,7 +242,27 @@ def setup_check():
 
 @app.post("/ensure-repo-exists")
 def ensure_repo_exists():
-    # ── 1. Determine local alignment ──────────────────────────────────────────
+    # ── 1. Restore tracked source changes in managed repo, keep untracked files ──
+    dirty = get_git_dirty_state(MLC_CLI_PATH)
+    if dirty["exists"] and dirty["tracked_dirty"]:
+        cleanup = restore_tracked_changes(MLC_CLI_PATH)
+        if not cleanup["ok"]:
+            detail = cleanup["error"] or "failed to restore tracked changes"
+            return {
+                "status": "error",
+                "message": (
+                    f"Managed Bryan repo at {MLC_CLI_PATH} has tracked source modifications and cleanup failed. "
+                    "Verification and repair/re-alignment are unsafe until tracked code is clean. "
+                    f"Details: {detail}"
+                ),
+                "path": str(MLC_CLI_PATH),
+                "action": "tracked-cleanup-failed",
+                "tracked_changes": dirty["tracked_changes"],
+                "dirty_error": dirty["error"],
+            }
+        print("[INFO] Restored tracked Bryan repo files to current checked-out commit before alignment.")
+
+    # ── 2. Determine local alignment ─────────────────────────────────────────
     # Path inside container for metadata
     upstream_meta = Path("/app/.upstream-sha.json")
     # In this repair-oriented flow, we attempt self-recovery of metadata if missing
@@ -249,7 +271,7 @@ def ensure_repo_exists():
     pinned_sha = align["pinned_sha"]
     current_sha = align["current_sha"]
 
-    # ── 2. Handle Repo Exists: Ensure Alignment ─────────────────────────────
+    # ── 3. Handle Repo Exists: Ensure Alignment ─────────────────────────────
     if align["exists"]:
         # If we have a pin and it doesn't match, re-align
         # We re-align if relation is behind, ahead, or diverged.

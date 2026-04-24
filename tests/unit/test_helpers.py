@@ -20,7 +20,9 @@ from app.helpers import (
     KNOWN_FAILURE_SIGNATURES,
     build_mlc_cli_command,
     detect_known_failure,
+    get_git_dirty_state,
     get_startup_alignment_message,
+    restore_tracked_changes,
     run_tool_check,
     try_restore_metadata,
 )
@@ -135,6 +137,109 @@ class TestRunToolCheck:
                 run_tool_check(["anything"])
             except Exception as exc:  # pragma: no cover
                 pytest.fail(f"run_tool_check raised unexpectedly: {exc}")
+
+
+# ── get_git_dirty_state ──────────────────────────────────────────────────────
+
+class TestGetGitDirtyState:
+    """get_git_dirty_state(repo_path) → structured working-tree state."""
+
+    def test_clean_repo_reports_not_dirty(self, tmp_path):
+        repo = tmp_path / "mlc-cli"
+        repo.mkdir()
+
+        with patch("app.helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            state = get_git_dirty_state(repo)
+
+        assert state["exists"] is True
+        assert state["tracked_dirty"] is False
+        assert state["tracked_changes"] == []
+        assert state["untracked_files"] == []
+        assert state["error"] is None
+
+    def test_tracked_dirty_and_untracked_are_split(self, tmp_path):
+        repo = tmp_path / "mlc-cli"
+        repo.mkdir()
+
+        with patch("app.helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=" M app/main.py\n?? scratch.txt\n",
+                stderr="",
+            )
+            state = get_git_dirty_state(repo)
+
+        assert state["exists"] is True
+        assert state["tracked_dirty"] is True
+        assert state["tracked_changes"] == [" M app/main.py"]
+        assert state["untracked_files"] == ["scratch.txt"]
+        assert state["error"] is None
+
+    def test_untracked_only_is_not_tracked_dirty(self, tmp_path):
+        repo = tmp_path / "mlc-cli"
+        repo.mkdir()
+
+        with patch("app.helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="?? cache/model.bin\n", stderr="")
+            state = get_git_dirty_state(repo)
+
+        assert state["tracked_dirty"] is False
+        assert state["tracked_changes"] == []
+        assert state["untracked_files"] == ["cache/model.bin"]
+
+
+class TestRestoreTrackedChanges:
+    """restore_tracked_changes(repo_path) restores tracked files only."""
+
+    def test_restores_tracked_changes_successfully(self, tmp_path):
+        repo = tmp_path / "mlc-cli"
+        repo.mkdir()
+
+        with patch("app.helpers.get_git_dirty_state") as mock_state, patch("app.helpers.subprocess.run") as mock_run:
+            mock_state.side_effect = [
+                {
+                    "exists": True,
+                    "tracked_dirty": True,
+                    "tracked_changes": [" M app/main.py"],
+                    "untracked_files": ["cache/model.bin"],
+                    "error": None,
+                },
+                {
+                    "exists": True,
+                    "tracked_dirty": False,
+                    "tracked_changes": [],
+                    "untracked_files": ["cache/model.bin"],
+                    "error": None,
+                },
+            ]
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            result = restore_tracked_changes(repo)
+
+        assert result["ok"] is True
+        assert result["restored"] is True
+        assert result["after"]["tracked_dirty"] is False
+        assert result["after"]["untracked_files"] == ["cache/model.bin"]
+
+    def test_untracked_only_does_not_run_restore(self, tmp_path):
+        repo = tmp_path / "mlc-cli"
+        repo.mkdir()
+
+        with patch("app.helpers.get_git_dirty_state") as mock_state, patch("app.helpers.subprocess.run") as mock_run:
+            mock_state.return_value = {
+                "exists": True,
+                "tracked_dirty": False,
+                "tracked_changes": [],
+                "untracked_files": ["cache/model.bin"],
+                "error": None,
+            }
+
+            result = restore_tracked_changes(repo)
+
+        assert result["ok"] is True
+        assert result["restored"] is False
+        mock_run.assert_not_called()
 
 
 # ── build_mlc_cli_command ─────────────────────────────────────────────────────

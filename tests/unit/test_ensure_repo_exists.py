@@ -6,10 +6,9 @@ Tests for the POST /ensure-repo-exists endpoint.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import pytest
+
 
 def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
     """Build a fake subprocess.CompletedProcess-like mock."""
@@ -19,56 +18,140 @@ def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
     m.returncode = returncode
     return m
 
+
 class TestEnsureRepoExists:
-    
+
+    @patch("app.main.run_git")
+    @patch("app.main.get_repo_alignment")
+    @patch("app.main.restore_tracked_changes")
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_tracked_dirty_restores_before_realignment(self, mock_dirty, mock_restore, mock_align, mock_git, client, monkeypatch, tmp_path):
+        """Tracked Bryan changes are restored before alignment/checkouts proceed."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        mock_dirty.return_value = {
+            "exists": True,
+            "tracked_dirty": True,
+            "tracked_changes": [" M app/main.py"],
+            "untracked_files": ["scratch.txt"],
+            "error": None,
+        }
+        mock_restore.return_value = {
+            "ok": True,
+            "restored": True,
+            "before": mock_dirty.return_value,
+            "after": {
+                "exists": True,
+                "tracked_dirty": False,
+                "tracked_changes": [],
+                "untracked_files": ["scratch.txt"],
+                "error": None,
+            },
+            "error": None,
+        }
+        mock_align.return_value = {
+            "exists": True,
+            "pinned_sha": "abc123def456",
+            "current_sha": "abc123def456",
+            "relation": "match",
+        }
+
+        resp = client.post("/ensure-repo-exists")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["action"] == "already-aligned"
+        mock_restore.assert_called_once_with(fake_repo)
+
+    @patch("app.main.run_git")
+    @patch("app.main.get_repo_alignment")
+    @patch("app.main.restore_tracked_changes")
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_untracked_only_does_not_trigger_restore(self, mock_dirty, mock_restore, mock_align, mock_git, client, monkeypatch, tmp_path):
+        """Untracked artifacts do not enter tracked-code cleanup path."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        mock_dirty.return_value = {
+            "exists": True,
+            "tracked_dirty": False,
+            "tracked_changes": [],
+            "untracked_files": ["cache/model.bin"],
+            "error": None,
+        }
+        mock_align.return_value = {
+            "exists": True,
+            "pinned_sha": "abc123def456",
+            "current_sha": "abc123def456",
+            "relation": "match",
+        }
+
+        resp = client.post("/ensure-repo-exists")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["action"] == "already-aligned"
+        mock_restore.assert_not_called()
+
+        mock_git.assert_not_called()
+
     @patch("app.main.run_git")
     @patch("subprocess.run")
-    def test_repo_missing_no_pin_clones_head(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_missing_no_pin_clones_head(self, mock_dirty, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo missing, no pinned SHA in metadata -> clones HEAD."""
         monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        
+        mock_dirty.return_value = {"exists": False, "tracked_dirty": False, "tracked_changes": [], "untracked_files": [], "error": None}
+
         # Ensure Path("/app/.upstream-sha.json").is_file() returns False
         with patch("pathlib.Path.is_file", return_value=False):
             mock_git.return_value = _proc()
             resp = client.post("/ensure-repo-exists")
-            
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "cloned"
         assert "cloned (HEAD)" in data["message"]
-        
+
         # Check git calls: should just be clone
         mock_git.assert_called_once()
         assert "clone" in mock_git.call_args[0][0]
 
     @patch("app.main.run_git")
     @patch("subprocess.run")
-    def test_repo_missing_with_pin_clones_and_checkouts(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_missing_with_pin_clones_and_checkouts(self, mock_dirty, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo missing, pinned SHA present -> clones then checkouts pin."""
         pinned_sha = "pinned123456789"
         monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        
+        mock_dirty.return_value = {"exists": False, "tracked_dirty": False, "tracked_changes": [], "untracked_files": [], "error": None}
+
         # Mock metadata reading
         mock_meta = MagicMock(spec=Path)
         mock_meta.is_file.return_value = True
         mock_meta.read_text.return_value = json.dumps({"pinned_sha": pinned_sha})
-        
+
         # Patch Path so when it's called with /app/... it returns our mock
         original_path = Path
+
         def mocked_path(p):
             if str(p) == "/app/.upstream-sha.json":
                 return mock_meta
             return original_path(p)
-            
+
         with patch("app.main.Path", side_effect=mocked_path):
             mock_git.return_value = _proc()
             resp = client.post("/ensure-repo-exists")
-            
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "cloned"
         assert pinned_sha[:12] in data["message"]
-        
+
         # Check git calls: clone then checkout
         assert mock_git.call_count == 2
         calls = [c[0][0] for c in mock_git.call_args_list]
@@ -78,78 +161,84 @@ class TestEnsureRepoExists:
 
     @patch("app.main.run_git")
     @patch("subprocess.run")
-    def test_repo_exists_already_aligned(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_already_aligned(self, mock_dirty, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists and current SHA matches pinned SHA -> no-op."""
         pinned_sha = "pinned123"
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        
+        mock_dirty.return_value = {"exists": True, "tracked_dirty": False, "tracked_changes": [], "untracked_files": [], "error": None}
+
         # Mock metadata reading
         mock_meta = MagicMock(spec=Path)
         mock_meta.is_file.return_value = True
         mock_meta.read_text.return_value = json.dumps({"pinned_sha": pinned_sha})
-        
+
         original_path = Path
+
         def mocked_path(p):
             if str(p) == "/app/.upstream-sha.json":
                 return mock_meta
             return original_path(p)
-            
+
         with patch("app.main.Path", side_effect=mocked_path):
             mock_sub.return_value = _proc(stdout=pinned_sha)
             resp = client.post("/ensure-repo-exists")
-            
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "already-aligned"
         assert "already exists and is aligned" in data["message"]
-        
+
         # get_repo_alignment uses subprocess.run for rev-parse
         mock_sub.assert_called_once()
         assert "rev-parse" in mock_sub.call_args[0][0]
 
     @patch("app.main.run_git")
     @patch("subprocess.run")
-    def test_repo_exists_misaligned_triggers_realignment(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_misaligned_triggers_realignment(self, mock_dirty, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists but SHA differs -> fetches and checkouts pin."""
         pinned_sha = "pinned123"
         current_sha = "old456"
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        
+        mock_dirty.return_value = {"exists": True, "tracked_dirty": False, "tracked_changes": [], "untracked_files": [], "error": None}
+
         # Mock metadata reading
         mock_meta = MagicMock(spec=Path)
         mock_meta.is_file.return_value = True
         mock_meta.read_text.return_value = json.dumps({"pinned_sha": pinned_sha})
-        
+
         original_path = Path
+
         def mocked_path(p):
             if str(p) == "/app/.upstream-sha.json":
                 return mock_meta
             return original_path(p)
-            
+
         with patch("app.main.Path", side_effect=mocked_path):
             # Mock subprocess for get_repo_alignment
             mock_sub.side_effect = [
-                _proc(stdout=current_sha), # rev-parse
-                _proc(returncode=1),       # is-ancestor pinned current (not ahead)
-                _proc(returncode=1),       # is-ancestor current pinned (not behind -> diverged)
+                _proc(stdout=current_sha),  # rev-parse
+                _proc(returncode=1),        # is-ancestor pinned current (not ahead)
+                _proc(returncode=1),        # is-ancestor current pinned (not behind -> diverged)
             ]
             # Mock run_git for re-alignment
             mock_git.side_effect = [
                 _proc(),                   # fetch
-                _proc()                    # checkout
+                _proc(),                   # checkout
             ]
             resp = client.post("/ensure-repo-exists")
-            
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "re-aligned"
         assert pinned_sha[:12] in data["message"]
         assert data["previous_sha"] == current_sha
-        
+
         assert mock_git.call_count == 2
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert "fetch" in calls[0]
@@ -158,17 +247,19 @@ class TestEnsureRepoExists:
 
     @patch("app.main.run_git")
     @patch("subprocess.run")
-    def test_repo_exists_no_pin_fallback(self, mock_sub, mock_git, client, monkeypatch, tmp_path):
+    @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_no_pin_fallback(self, mock_dirty, mock_sub, mock_git, client, monkeypatch, tmp_path):
         """Repo exists, no pinning active -> returns success with warning."""
         fake_repo = tmp_path / "mlc-cli"
         fake_repo.mkdir()
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        
+        mock_dirty.return_value = {"exists": True, "tracked_dirty": False, "tracked_changes": [], "untracked_files": [], "error": None}
+
         # Mock metadata file missing
         with patch("pathlib.Path.is_file", return_value=False):
             mock_sub.return_value = _proc(stdout="some-sha")
             resp = client.post("/ensure-repo-exists")
-            
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "none"

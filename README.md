@@ -34,35 +34,35 @@ These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web
 
 ### Utility
 
-| Method | Path                  | Description                                                 |
-| ------ | --------------------- | ----------------------------------------------------------- |
-| `GET`  | `/`                   | Welcome message                                             |
-| `GET`  | `/health`             | Service health check                                        |
-| `GET`  | `/setup-check`        | Inspect repo, Go, Conda, nvidia-smi, and nvcc               |
-| `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes |
-| `POST` | `/ensure-repo-exists` | Clone or re-align `mlc-cli` repo to the pinned approved SHA |
-| `GET`  | `/artifacts`          | List locally built wheels, converted models, and compiled libs|
+| Method | Path                  | Description                                                                                       |
+| ------ | --------------------- | ------------------------------------------------------------------------------------------------- |
+| `GET`  | `/`                   | Welcome message                                                                                   |
+| `GET`  | `/health`             | Service health check                                                                              |
+| `GET`  | `/setup-check`        | Inspect repo, Go, Conda, nvidia-smi, and nvcc                                                     |
+| `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes                                       |
+| `POST` | `/ensure-repo-exists` | Clone or re-align `mlc-cli` repo to the pinned approved SHA; auto-restores tracked source changes |
+| `GET`  | `/artifacts`          | List locally built wheels, converted models, and compiled libs                                    |
 
 ### Pipeline
 
-| Method | Path       | Description                                                                   |
-| ------ | ---------- | ----------------------------------------------------------------------------- |
-| `POST` | `/build`   | Build TVM + MLC from source; stream output as SSE                             |
-| `POST` | `/quantize`| Convert/quantize raw model weights to MLC format; stream output as SSE        |
-| `POST` | `/compile` | Compile model library; stream output as SSE                                   |
-| `POST` | `/run`     | Load-test a model by initializing the interactive REPL; stream output as SSE  |
+| Method | Path        | Description                                                                  |
+| ------ | ----------- | ---------------------------------------------------------------------------- |
+| `POST` | `/build`    | Build TVM + MLC from source; stream output as SSE                            |
+| `POST` | `/quantize` | Convert/quantize raw model weights to MLC format; stream output as SSE       |
+| `POST` | `/compile`  | Compile model library; stream output as SSE                                  |
+| `POST` | `/run`      | Load-test a model by initializing the interactive REPL; stream output as SSE |
 
 ### `GET /setup-check`
 
 Checks five things and returns a structured result:
 
-| Check        | What it verifies                            |
-| ------------ | ------------------------------------------- |
+| Check        | What it verifies                               |
+| ------------ | ---------------------------------------------- |
 | `repo`       | `mlc-cli` repo present at `/workspace/mlc-cli` |
-| `go`         | `go version` exits 0                        |
-| `conda`      | `conda --version` exits 0                   |
-| `nvidia_smi` | `nvidia-smi` can query the GPU              |
-| `nvcc`       | `nvcc --version` exits 0                    |
+| `go`         | `go version` exits 0                           |
+| `conda`      | `conda --version` exits 0                      |
+| `nvidia_smi` | `nvidia-smi` can query the GPU                 |
+| `nvcc`       | `nvcc --version` exits 0                       |
 
 **Response shape:**
 
@@ -71,17 +71,34 @@ Checks five things and returns a structured result:
   "repo_exists": true,
   "status": "ok",
   "checks": {
-    "repo":       { "available": true,  "path": "/workspace/mlc-cli", "origin": "https://..." },
-    "go":         { "available": true,  "output": "go version go1.24.0 linux/amd64", "returncode": 0 },
-    "conda":      { "available": true,  "output": "conda 24.1.2", "returncode": 0 },
-    "nvidia_smi": { "available": true,  "output": "NVIDIA GeForce RTX 3090", "returncode": 0 },
-    "nvcc":       { "available": true,  "output": "nvcc: NVIDIA (R) Cuda compiler driver, V12.6.0", "returncode": 0 }
+    "repo": {
+      "available": true,
+      "path": "/workspace/mlc-cli",
+      "origin": "https://..."
+    },
+    "go": {
+      "available": true,
+      "output": "go version go1.24.0 linux/amd64",
+      "returncode": 0
+    },
+    "conda": { "available": true, "output": "conda 24.1.2", "returncode": 0 },
+    "nvidia_smi": {
+      "available": true,
+      "output": "NVIDIA GeForce RTX 3090",
+      "returncode": 0
+    },
+    "nvcc": {
+      "available": true,
+      "output": "nvcc: NVIDIA (R) Cuda compiler driver, V12.6.0",
+      "returncode": 0
+    }
   },
   "warnings": []
 }
 ```
 
 `status` is one of `"ok"` | `"warning"` | `"error"`:
+
 - `"ok"` — repo exists, Go and Conda are available.
 - `"warning"` — tools are present but the repo hasn't been cloned yet.
 - `"error"` — Go or Conda is missing; the build cannot proceed.
@@ -93,6 +110,7 @@ GPU tools (`nvidia-smi`, `nvcc`) that are unavailable are listed in `warnings` b
 A convenience endpoint to view the outputs of the build, convert, and compile steps without needing to manually inspect the container filesystem.
 
 This endpoint scans the local `mlc-cli` workspace and returns a structured JSON list of:
+
 - **Built wheels** (`.whl`)
 - **Converted models** (directories containing `mlc-chat-config.json`)
 - **Compiled model libraries** (`.so`, `.dylib`, `.dll`)
@@ -102,9 +120,7 @@ This endpoint scans the local `mlc-cli` workspace and returns a structured JSON 
 ```json
 {
   "status": "ok",
-  "root_paths_searched": [
-    "/workspace/mlc-cli"
-  ],
+  "root_paths_searched": ["/workspace/mlc-cli"],
   "counts": {
     "build": 1,
     "convert": 1,
@@ -199,9 +215,9 @@ Quantizes (converts) raw model weights to MLC format and **streams stdout/stderr
 Internally this calls the mlc-cli `quantize` sub-command, which runs two steps in sequence:
 
 1. `mlc_llm convert_weight` — convert Hugging Face weights to MLC format with the selected quantization.
-2. `mlc_llm gen_config`     — write the runtime config alongside the converted weights.
+2. `mlc_llm gen_config` — write the runtime config alongside the converted weights.
 
-**Pipeline position:** Run `/quantize` *after* `/build` (which installs the `mlc-llm` Python package) and *before* `/run`.
+**Pipeline position:** Run `/quantize` _after_ `/build` (which installs the `mlc-llm` Python package) and _before_ `/run`.
 
 **Request body (`model` is required; all other fields are optional):**
 
@@ -215,13 +231,13 @@ Internally this calls the mlc-cli `quantize` sub-command, which runs two steps i
 }
 ```
 
-| Field           | Type   | Default    | Notes                                                                                        |
-| --------------- | ------ | ---------- | -------------------------------------------------------------------------------------------- |
-| `model`         | string | *(required)* | Path to a local model dir (e.g. `models/Llama-3-8B`). Relative paths are resolved against the workspace root |
-| `quant`         | string | `q4f16_1`  | Quantization: `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`  |
-| `device`        | string | `cuda`     | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                  |
-| `conv_template` | string | `llama-3`  | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`   |
-| `output`        | string | `""`       | Output directory. If empty, mlc-cli uses `dist/<model_basename>-<quant>-MLC`               |
+| Field           | Type   | Default      | Notes                                                                                                        |
+| --------------- | ------ | ------------ | ------------------------------------------------------------------------------------------------------------ |
+| `model`         | string | _(required)_ | Path to a local model dir (e.g. `models/Llama-3-8B`). Relative paths are resolved against the workspace root |
+| `quant`         | string | `q4f16_1`    | Quantization: `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`                       |
+| `device`        | string | `cuda`       | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                                   |
+| `conv_template` | string | `llama-3`    | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`                     |
+| `output`        | string | `""`         | Output directory. If empty, mlc-cli uses `dist/<model_basename>-<quant>-MLC`                                 |
 
 **Example — quantize a Llama-3 8B model:**
 
@@ -241,7 +257,7 @@ Compiles a model library and **streams stdout/stderr as SSE**.
 
 Internally this calls the mlc-cli `compile` sub-command.
 
-**Pipeline position:** Run `/compile` *after* `/convert` and *before* `/run`.
+**Pipeline position:** Run `/compile` _after_ `/convert` and _before_ `/run`.
 
 **Request body (`model` is required; all other fields are optional):**
 
@@ -254,12 +270,12 @@ Internally this calls the mlc-cli `compile` sub-command.
 }
 ```
 
-| Field    | Type   | Default   | Notes                                                              |
-| -------- | ------ | --------- | ------------------------------------------------------------------ |
-| `model`  | string | *(req)*   | Path to a local model dir (e.g. `dist/Llama-3-8B-q4f16_1-MLC`). Relative paths are resolved against the workspace root |
-| `quant`  | string | `q4f16_1` | Quantization: `q4f16_1`, `q0f32`, etc.                             |
-| `device` | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`         |
-| `output` | string | `""`      | Output directory or file path. If empty, uses default              |
+| Field    | Type   | Default   | Notes                                                                                                                  |
+| -------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `model`  | string | _(req)_   | Path to a local model dir (e.g. `dist/Llama-3-8B-q4f16_1-MLC`). Relative paths are resolved against the workspace root |
+| `quant`  | string | `q4f16_1` | Quantization: `q4f16_1`, `q0f32`, etc.                                                                                 |
+| `device` | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                                             |
+| `output` | string | `""`      | Output directory or file path. If empty, uses default                                                                  |
 
 **Example — compile a Llama-3 8B model:**
 
@@ -281,7 +297,7 @@ Internally this calls the mlc-cli `run` sub-command.
 
 **LIMITATION**: The upstream `mlc-cli run` command is interactive by default and does NOT support a non-interactive single-shot `--prompt` flag. When called via this API endpoint, no standard input is provided. The subprocess will initialize the model, print its ready state, and immediately exit upon encountering EOF. This effectively serves as a "load test" to verify model and compiled library compatibility.
 
-**Pipeline position:** Run `/run` *after* `/compile` (and `/quantize`). 
+**Pipeline position:** Run `/run` _after_ `/compile` (and `/quantize`).
 
 **Request body (`model_name` is required; all other fields are optional):**
 
@@ -295,12 +311,12 @@ Internally this calls the mlc-cli `run` sub-command.
 }
 ```
 
-| Field        | Type   | Default   | Notes                                                               |
-| ------------ | ------ | --------- | ------------------------------------------------------------------- |
-| `model_name` | string | *(req)*   | Model directory name in models/ (e.g. `Llama-3-8B`)                 |
-| `model_url`  | string | `""`      | Optional Git URL to clone the model from                            |
-| `device`     | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`          |
-| `profile`    | string | `default` | Compute profile: `really-low`, `low`, `default`, `high`             |
+| Field        | Type   | Default   | Notes                                                                                           |
+| ------------ | ------ | --------- | ----------------------------------------------------------------------------------------------- |
+| `model_name` | string | _(req)_   | Model directory name in models/ (e.g. `Llama-3-8B`)                                             |
+| `model_url`  | string | `""`      | Optional Git URL to clone the model from                                                        |
+| `device`     | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                      |
+| `profile`    | string | `default` | Compute profile: `really-low`, `low`, `default`, `high`                                         |
 | `model_lib`  | string | `""`      | Optional path to compiled `.so` library. Relative paths are resolved against the workspace root |
 
 **Example — load test a model:**
@@ -397,6 +413,7 @@ It performs the following steps sequentially against the API (`http://localhost:
 7. **Run Load-Test**: Dynamically picks a local model from `/artifacts` to load-test, or gracefully skips if none are found.
 
 **Optional Environment Variables for Smoke Test:**
+
 - `RUN_MODEL_NAME`, `RUN_MODEL_URL`, `RUN_MODEL_LIB`, `RUN_DEVICE`: Manually specify the target model for `/run` instead of auto-discovering one from `/artifacts`.
 - `DOWNLOAD_RUN_MODEL_IF_MISSING=1`: If no model is provided or discovered, automatically download and load-test `TinyLlama-1.1B` to forcefully test `/run` instead of skipping it.
 
@@ -425,12 +442,15 @@ python tests/integration/test_full_pipeline.py
 
 **Cleanup**
 If you rely on the auto-downloaded fallback (Option A) and want the script to delete the cloned raw model folder from your disk after the test completes, run it with:
+
 ```bash
 CLEANUP_FULL_MODEL=1 python tests/integration/test_full_pipeline.py
 ```
-*(Note: Cleanup only removes the `.raw_model_cache` if it was freshly downloaded during this specific run; it will not delete a previously reused cache).*
+
+_(Note: Cleanup only removes the `.raw_model_cache` if it was freshly downloaded during this specific run; it will not delete a previously reused cache)._
 
 **Optional overrides:**
+
 - `FULL_BUILD_ACTION` (default: `install-wheels`)
 - `FULL_CONV_TEMPLATE`: Usually auto-detected from path/config. Use to override.
 - `FULL_QUANT` (default: `q4f16_1`)
