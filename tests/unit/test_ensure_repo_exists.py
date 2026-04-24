@@ -25,6 +25,41 @@ class TestEnsureRepoExists:
     @patch("app.main.get_repo_alignment")
     @patch("app.main.restore_tracked_changes")
     @patch("app.main.get_git_dirty_state")
+    def test_repo_exists_tracked_dirty_restore_failure_stops_alignment(self, mock_dirty, mock_restore, mock_align, mock_git, client, monkeypatch, tmp_path):
+        """If tracked-file restore fails, the endpoint stops before any alignment or checkout work."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        mock_dirty.return_value = {
+            "exists": True,
+            "tracked_dirty": True,
+            "tracked_changes": [" M app/main.py"],
+            "untracked_files": ["scratch.txt"],
+            "error": None,
+        }
+        mock_restore.return_value = {
+            "ok": False,
+            "restored": False,
+            "before": mock_dirty.return_value,
+            "after": mock_dirty.return_value,
+            "error": "git restore failed",
+        }
+
+        resp = client.post("/ensure-repo-exists")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert data["action"] == "tracked-cleanup-failed"
+        assert "cleanup failed" in data["message"]
+        mock_align.assert_not_called()
+        mock_git.assert_not_called()
+
+    @patch("app.main.run_git")
+    @patch("app.main.get_repo_alignment")
+    @patch("app.main.restore_tracked_changes")
+    @patch("app.main.get_git_dirty_state")
     def test_repo_exists_tracked_dirty_restores_before_realignment(self, mock_dirty, mock_restore, mock_align, mock_git, client, monkeypatch, tmp_path):
         """Tracked Bryan changes are restored before alignment/checkouts proceed."""
         fake_repo = tmp_path / "mlc-cli"

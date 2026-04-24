@@ -5,9 +5,11 @@ Focused tests for the manual upstream verification script.
 """
 from __future__ import annotations
 
+import argparse
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 import verify_upstream
 
@@ -105,6 +107,55 @@ class TestVerifyUpstreamDirtyGuard:
             verify_upstream.preflight()
 
         mock_cleanup.assert_not_called()
+
+
+class TestVerifyUpstreamFailureRollback:
+    """Failures stop promotion and still roll back the in-progress candidate state."""
+
+    @patch("verify_upstream.handle_issues")
+    @patch("verify_upstream.git_push")
+    @patch("verify_upstream.commit_metadata")
+    @patch("verify_upstream.run_test")
+    @patch("verify_upstream.checkout_in_container")
+    @patch("verify_upstream.read_container_sha")
+    @patch("verify_upstream.fetch_upstream_head")
+    @patch("verify_upstream.read_pinned_sha")
+    @patch("verify_upstream.preflight")
+    @patch("verify_upstream.RECOVERY_MARKER")
+    @patch.object(argparse.ArgumentParser, "parse_args", return_value=argparse.Namespace(push=False))
+    def test_smoke_failure_rolls_back_and_blocks_promotion(
+        self,
+        mock_parse_args,
+        mock_marker,
+        mock_preflight,
+        mock_read_pinned,
+        mock_fetch_head,
+        mock_read_container,
+        mock_checkout,
+        mock_run_test,
+        mock_commit,
+        mock_push,
+        mock_handle_issues,
+    ):
+        mock_marker.exists.side_effect = [False, True]
+        mock_read_pinned.return_value = "pinned-sha"
+        mock_fetch_head.return_value = "candidate-sha"
+        mock_read_container.side_effect = ["original-sha", "candidate-sha"]
+        mock_run_test.return_value = False
+
+        with pytest.raises(SystemExit):
+            verify_upstream.main()
+
+        mock_preflight.assert_called_once_with(want_push=False)
+        mock_checkout.assert_any_call("candidate-sha")
+        mock_checkout.assert_any_call("original-sha")
+        assert mock_checkout.call_count == 2
+        mock_run_test.assert_called_once_with("Smoke Integration Test", verify_upstream.SMOKE)
+        mock_commit.assert_not_called()
+        mock_push.assert_not_called()
+        mock_handle_issues.assert_called_once_with("candidate-sha", False, None, False, False)
+        mock_marker.write_text.assert_called_once()
+        mock_marker.unlink.assert_called_once()
 
     @patch("verify_upstream.try_restore_metadata")
     @patch("verify_upstream.restore_tracked_changes")
