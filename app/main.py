@@ -260,7 +260,10 @@ def ensure_repo_exists():
                 "tracked_changes": dirty["tracked_changes"],
                 "dirty_error": dirty["error"],
             }
-        print("[INFO] Restored tracked Bryan repo files to current checked-out commit before alignment.")
+        print(
+            "[INFO] Managed repo was dirty and was automatically restored to the current checked-out commit "
+            "before alignment. Artifacts, downloaded files, and cache were not affected."
+        )
 
     # ── 2. Determine local alignment ─────────────────────────────────────────
     # Path inside container for metadata

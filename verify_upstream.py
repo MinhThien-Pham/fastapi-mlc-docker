@@ -55,7 +55,10 @@ def preflight(want_push=False):
                 "Verification is unsafe until tracked code is clean. "
                 f"Details: {detail}"
             )
-        print("  ✓ Tracked Bryan repo files restored to current checked-out commit")
+        print(
+            "  ✓ Managed repo was dirty and was automatically restored to the current checked-out commit"
+        )
+        print("  ✓ Artifacts, downloaded files, and cache were not affected")
 
     # 2. Metadata self-recovery
     if not try_restore_metadata(METADATA):
