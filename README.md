@@ -1,457 +1,456 @@
-# fastapi-mlc-docker
+<h1 align="center">
+  🚀 MLC-CLI Build Service
+</h1>
 
-A Dockerised FastAPI service that **clones, builds, and drives [`mlc-cli`](https://github.com/ballinyouup/mlc-cli)** — a Go CLI tool for compiling MLC-LLM — and streams real-time build output back to the caller via **Server-Sent Events (SSE)**.
+<p align="center">
+  <strong>A FastAPI wrapper around <a href="https://github.com/ballinyouup/mlc-cli/">ballinyouup/mlc-cli</a><br>
+  for repeatable builds, pinned-upstream safety, and real-time streaming output.</strong>
+</p>
 
-## Prerequisites
+<p align="center">
+  <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-5_min-blue?style=for-the-badge" alt="Quick Start"></a>
+  <a href="#-demo--test-results"><img src="https://img.shields.io/badge/Demos-3_demos-green?style=for-the-badge" alt="Demos"></a>
+  <a href="#-test-strategy"><img src="https://img.shields.io/badge/Tests-Layered-brightgreen?style=for-the-badge" alt="Tests"></a>
+  <a href="#-api-overview"><img src="https://img.shields.io/badge/API-SSE_Streaming-blueviolet?style=for-the-badge" alt="API"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="License"></a>
+</p>
 
-| Requirement                                                                                                      | Notes                                    |
-| ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Docker + Docker Compose                                                                                          | v2.x or later                            |
-| NVIDIA GPU + drivers                                                                                             | CUDA 12.6 compatible                     |
-| [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) | Enables GPU passthrough to the container |
+<p align="center">
+  <img src="https://img.shields.io/badge/FastAPI-0.100+-blue?logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white" alt="CUDA">
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white" alt="Go">
+</p>
 
-## 🚀 Quick Start
+---
+
+## 🎯 What This Repository Does
+
+This repository provides a **FastAPI service** that wraps the upstream Go project [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/).
+
+The upstream `mlc-cli` project handles the actual MLC build and model workflow. This repository adds the service layer around it:
+
+- **REST endpoints** for setup, build, quantize, compile, run, and artifact discovery
+- **Server-Sent Events (SSE)** so long-running operations stream progress live
+- **Pinned upstream management** so the service does not silently drift to an unverified upstream commit
+- **Verification and promotion tooling** before accepting a newer upstream version
+- **Repair / re-alignment utilities** when the local upstream checkout drifts from the approved state
+
+In short:
+
+> `ballinyouup/mlc-cli` is the upstream tool.  
+> This repository is the API + safety layer around that tool.
+
+---
+
+## 🤔 Why This Project Exists
+
+Using an upstream build tool directly is convenient, but it creates a few practical problems:
+
+| Problem                                                 | Why it matters                                                                                                            | What this repository adds                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Upstream changes can break your workflow**            | A newer commit in [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/) may change flags, scripts, or behavior | Pin an approved upstream SHA and only move forward after verification     |
+| **The local upstream checkout can drift**               | Tracked source files may change locally by accident                                                                       | Detect and restore tracked drift, then re-align when needed               |
+| **Long-running steps are hard to observe**              | Builds and model steps can take a while                                                                                   | Stream progress live through SSE                                          |
+| **A wrapper API needs stronger operational guardrails** | A plain wrapper is easy to break silently                                                                                 | Add status checks, contract checks, manual verification, and repair flows |
+
+This makes the service more predictable for repeated local use, demos, and future maintenance.
+
+---
+
+## 🏗️ Architecture Overview
+
+<p align="center">
+  <em>📊 Placeholder: static architecture diagram showing this repo, the upstream <code>mlc-cli</code> repo, pinned SHA metadata, verification flow, and build outputs.</em><br>
+  <img src="assets/architecture-placeholder.svg" alt="Architecture Diagram" width="700" style="max-width: 100%; border: 1px solid #ccc; border-radius: 4px; padding: 10px;">
+</p>
+
+**High-level flow:**
+
+```text
+This repo (FastAPI service)
+        ↓
+Managed checkout of upstream ballinyouup/mlc-cli
+        ↓
+Build / quantize / compile / run
+        ↓
+Artifacts + streamed logs
+```
+
+**Safety flow:**
+
+```text
+Pinned SHA  →  verify candidate  →  promote if verified  →  repair back to pin if needed
+```
+
+---
+
+## 🔐 Upstream Safety Model
+
+The upstream project is [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/).  
+This repository does **not** blindly follow its latest `HEAD`. Instead, it uses a **pinned + verify + promote** model.
+
+### 1️⃣ Pinned SHA (approved baseline)
+
+A known-good upstream commit is stored in `.upstream-sha.json`:
+
+```json
+{
+  "repo": "https://github.com/ballinyouup/mlc-cli.git",
+  "pinned_sha": "abc1234567...",
+  "pinned_date": "2026-04-24T09:00:00-04:00"
+}
+```
+
+That pinned SHA is the baseline used for:
+
+- repair / re-alignment
+- startup status checks
+- deciding whether a newer upstream commit still needs verification
+
+### 2️⃣ Lightweight contract check
+
+This repository includes a lightweight upstream contract check to catch obvious interface drift early.
+
+It runs in the upstream drift workflow:
+
+- **automatically every Monday at 14:00 UTC**  
+  (**10:00 AM EDT / 9:00 AM EST**)
+- **manually on demand** through GitHub Actions workflow dispatch
+
+Its job is to answer questions like:
+
+- do the expected CLI flags still exist?
+- do required scripts still exist?
+- does the upstream surface still look compatible enough to keep evaluating?
+
+If the weekly drift workflow detects that the pinned SHA is behind the latest upstream `HEAD`, it runs this contract check against the newer candidate.
+
+Possible outcomes:
+
+- **contract still looks compatible** → the workflow records a summary, but does **not** auto-promote anything
+- **contract check fails** → the workflow opens an issue for investigation
+- **result is inconclusive** → manual review is still required
+
+This check is useful, but it is **not enough by itself**. A passing contract check does **not** prove that the full build pipeline still works.
+
+### 3️⃣ Manual verification and promotion
+
+When a newer commit from [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/) is being evaluated, run:
+
+```bash
+python verify_upstream.py
+```
+
+That flow performs:
+
+- a **smoke integration check**
+- a **full integration check**
+- promotion of the new SHA **only if the candidate passes**
+
+If the candidate fails, the pin remains unchanged.
+
+### Why multiple verification layers exist
+
+Different checks answer different questions. That is why manual verification still matters.
+
+| Verification layer     | Rough confidence | What it tells us                                                                      |
+| ---------------------- | ---------------: | ------------------------------------------------------------------------------------- |
+| **CLI contract check** |             ~50% | The upstream CLI still looks compatible at the surface/interface level                |
+| **Smoke integration**  |             ~70% | The basic service → upstream → result path still works                                |
+| **Full integration**   |             ~95% | The full build → quantize → compile → run path still works on the evaluated candidate |
+
+**Notes**
+
+- These percentages are rough, subjective estimates for comparison only.
+- They are not formal measurements.
+- The point of the table is to show why a lightweight check is helpful, but still not enough to replace manual verification.
+
+### Typical flows
+
+If you are new to the project, these are the three flows to remember:
+
+1. **Normal use** — start the service, run setup checks, then use the API endpoints.
+2. **Upstream update** — run `python verify_upstream.py`, review the result, and only promote when it passes.
+3. **Repair / re-alignment** — call `/ensure-repo-exists` when the managed upstream checkout drifts away from the approved state.
+
+---
+
+## 🔧 Quick Start
+
+### Prerequisites
+
+| Requirement                  | Notes                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| **Docker + Docker Compose**  | v2.x or later                                                           |
+| **NVIDIA GPU + drivers**     | optional for some checks, required for GPU-backed build/inference flows |
+| **NVIDIA Container Toolkit** | required for GPU passthrough inside Docker                              |
+
+### Launch the service
 
 ```bash
 docker compose up --build
 ```
 
-The API will be available at `http://localhost:8000`.
+The API will be available at:
+
+```text
+http://localhost:8000
+```
+
+### Try the basic flow
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/setup-check
+curl -N -X POST http://localhost:8000/build \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"install-wheels"}'
+```
+
+---
 
 ## ⚙️ Environment Variables
 
-These can be overridden at runtime (e.g. `docker compose run -e CUDA_ARCH=89 web`):
+| Variable       | Default   | Description                                |
+| -------------- | --------- | ------------------------------------------ |
+| `BUILD_ACTION` | `full`    | `full` \| `build-only` \| `install-wheels` |
+| `CUDA_ARCH`    | `86`      | CUDA compute capability                    |
+| `TVM_SOURCE`   | `bundled` | `bundled` \| `relax` \| `custom`           |
+| `BUILD_WHEELS` | `y`       | Build Python wheels (`y`/`n`)              |
+| `MLC_DEVICE`   | `cuda`    | Target device for MLC inference            |
 
-| Variable       | Default   | Description                                                                   |
-| -------------- | --------- | ----------------------------------------------------------------------------- |
-| `BUILD_ACTION` | `full`    | Build action passed to `mlc-cli` (`full` \| `build-only` \| `install-wheels`) |
-| `CUDA_ARCH`    | `86`      | CUDA compute capability (e.g. `86` for RTX 30xx, `89` for RTX 40xx)           |
-| `TVM_SOURCE`   | `bundled` | TVM source (`bundled` \| `relax` \| `custom`)                                 |
-| `BUILD_WHEELS` | `y`       | Whether to build Python wheels (`y`/`n`)                                      |
-| `MLC_DEVICE`   | `cuda`    | Target device for MLC inference                                               |
+---
 
-## 📌 API Endpoints
+## 📡 API Overview
 
-### Utility
+This service exposes REST endpoints for:
 
-| Method | Path                  | Description                                                                                       |
-| ------ | --------------------- | ------------------------------------------------------------------------------------------------- |
-| `GET`  | `/`                   | Welcome message                                                                                   |
-| `GET`  | `/health`             | Service health check                                                                              |
-| `GET`  | `/setup-check`        | Inspect repo, Go, Conda, nvidia-smi, and nvcc                                                     |
-| `GET`  | `/repo-status`        | Check if `mlc-cli` repo is clean or has uncommitted changes                                       |
-| `POST` | `/ensure-repo-exists` | Clone or re-align `mlc-cli` repo to the pinned approved SHA; auto-restores tracked source changes |
-| `GET`  | `/artifacts`          | List locally built wheels, converted models, and compiled libs                                    |
+- environment checks
+- managed upstream repair / alignment
+- artifact discovery
+- build pipeline steps
 
-### Pipeline
+The long-running pipeline endpoints stream output with **Server-Sent Events (SSE)**.
 
-| Method | Path        | Description                                                                  |
-| ------ | ----------- | ---------------------------------------------------------------------------- |
-| `POST` | `/build`    | Build TVM + MLC from source; stream output as SSE                            |
-| `POST` | `/quantize` | Convert/quantize raw model weights to MLC format; stream output as SSE       |
-| `POST` | `/compile`  | Compile model library; stream output as SSE                                  |
-| `POST` | `/run`      | Load-test a model by initializing the interactive REPL; stream output as SSE |
+### Utility endpoints
 
-### `GET /setup-check`
+| Method | Endpoint              | Purpose                                                                                                   |
+| ------ | --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`             | Service health check                                                                                      |
+| `GET`  | `/setup-check`        | Verify environment readiness                                                                              |
+| `POST` | `/ensure-repo-exists` | Create or repair the managed checkout of [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/) |
+| `GET`  | `/repo-status`        | Show alignment / dirty-state status for the managed upstream checkout                                     |
+| `GET`  | `/artifacts`          | Discover built wheels, converted models, and compiled libraries                                           |
 
-Checks five things and returns a structured result:
+### Build pipeline endpoints
 
-| Check        | What it verifies                               |
-| ------------ | ---------------------------------------------- |
-| `repo`       | `mlc-cli` repo present at `/workspace/mlc-cli` |
-| `go`         | `go version` exits 0                           |
-| `conda`      | `conda --version` exits 0                      |
-| `nvidia_smi` | `nvidia-smi` can query the GPU                 |
-| `nvcc`       | `nvcc --version` exits 0                       |
+| Method | Endpoint    | Purpose                             | Output     |
+| ------ | ----------- | ----------------------------------- | ---------- |
+| `POST` | `/build`    | Compile TVM + MLC from source       | SSE stream |
+| `POST` | `/quantize` | Convert model weights to MLC format | SSE stream |
+| `POST` | `/compile`  | Compile the model library           | SSE stream |
+| `POST` | `/run`      | Load-test model initialization      | SSE stream |
 
-**Response shape:**
+For full request/response schemas, use the OpenAPI docs when the service is running:
 
-```json
-{
-  "repo_exists": true,
-  "status": "ok",
-  "checks": {
-    "repo": {
-      "available": true,
-      "path": "/workspace/mlc-cli",
-      "origin": "https://..."
-    },
-    "go": {
-      "available": true,
-      "output": "go version go1.24.0 linux/amd64",
-      "returncode": 0
-    },
-    "conda": { "available": true, "output": "conda 24.1.2", "returncode": 0 },
-    "nvidia_smi": {
-      "available": true,
-      "output": "NVIDIA GeForce RTX 3090",
-      "returncode": 0
-    },
-    "nvcc": {
-      "available": true,
-      "output": "nvcc: NVIDIA (R) Cuda compiler driver, V12.6.0",
-      "returncode": 0
-    }
-  },
-  "warnings": []
-}
+```text
+http://localhost:8000/docs
 ```
 
-`status` is one of `"ok"` | `"warning"` | `"error"`:
+---
 
-- `"ok"` — repo exists, Go and Conda are available.
-- `"warning"` — tools are present but the repo hasn't been cloned yet.
-- `"error"` — Go or Conda is missing; the build cannot proceed.
+## 🔄 Verification Workflow
 
-GPU tools (`nvidia-smi`, `nvcc`) that are unavailable are listed in `warnings` but do not change `status` to `"error"` on their own.
-
-### `GET /artifacts`
-
-A convenience endpoint to view the outputs of the build, convert, and compile steps without needing to manually inspect the container filesystem.
-
-This endpoint scans the local `mlc-cli` workspace and returns a structured JSON list of:
-
-- **Built wheels** (`.whl`)
-- **Converted models** (directories containing `mlc-chat-config.json`)
-- **Compiled model libraries** (`.so`, `.dylib`, `.dll`)
-
-**Example Response:**
-
-```json
-{
-  "status": "ok",
-  "root_paths_searched": ["/workspace/mlc-cli"],
-  "counts": {
-    "build": 1,
-    "convert": 1,
-    "compile": 1,
-    "total": 3
-  },
-  "artifacts": [
-    {
-      "type": "wheel",
-      "name": "mlc_llm-0.1.0-cp310-cp310-linux_x86_64.whl",
-      "path": "build/mlc_llm-0.1.0-cp310-cp310-linux_x86_64.whl",
-      "source_step": "build",
-      "size_bytes": 1420583,
-      "modified_time": 1714589212.0
-    },
-    {
-      "type": "model_dir",
-      "name": "Llama-3-8B-q4f16_1-MLC",
-      "path": "dist/Llama-3-8B-q4f16_1-MLC",
-      "source_step": "convert",
-      "size_bytes": 4512938491,
-      "modified_time": 1714589500.0
-    },
-    {
-      "type": "compiled_lib",
-      "name": "Llama-3-8B-q4f16_1-cuda.so",
-      "path": "dist/Llama-3-8B-q4f16_1-MLC/Llama-3-8B-q4f16_1-cuda.so",
-      "source_step": "compile",
-      "size_bytes": 84592,
-      "modified_time": 1714589600.0
-    }
-  ]
-}
-```
-
-### Build
-
-#### `POST /build`
-
-Triggers `mlc-cli build` non-interactively and **streams stdout/stderr as SSE**.
-
-If a **cutlass / flash-attn failure** is detected in the output, a `[HINT]` line is automatically emitted after the offending line with a ready-to-paste retry command — no searching the logs required.
-
-**Request body (all fields optional):**
-
-```json
-{
-  "action": "full",
-  "tvm_source": "bundled",
-  "cuda": "y",
-  "cuda_arch": "86",
-  "cutlass": "n",
-  "cublas": "n",
-  "flash_infer": "n",
-  "rocm": "n",
-  "vulkan": "n",
-  "opencl": "n",
-  "build_wheels": "y",
-  "force_clone": "n"
-}
-```
-
-**Example — stream a wheel-only install:**
+This is the operator workflow for evaluating a newer upstream commit from [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/).
 
 ```bash
-curl -N -X POST http://localhost:8000/build \
-     -H 'Content-Type: application/json' \
-     -d '{"action": "install-wheels"}'
+python verify_upstream.py
+git log -1
+python verify_upstream.py --push
 ```
 
-Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+Under the hood:
 
-**Cutlass / flash-attn failures** — if the stream contains a known error signature, you will automatically see:
+1. **Preflight** — confirm the managed upstream checkout is safe to touch
+2. **Smoke integration** — catch quick failures early
+3. **Full integration** — run the complete pipeline
+4. **Promotion** — update the pin only after success
 
-```
-data: [HINT] This looks like a cutlass / flash-attn build failure.
-data: [HINT] Retry with cutlass and flash_infer disabled:
-data: [HINT]
-data: [HINT]   curl -N -X POST http://localhost:8000/build \
-data: [HINT]        -H 'Content-Type: application/json' \
-data: [HINT]        -d '{"action":"full","cutlass":"n","flash_infer":"n"}'
-```
+> See the demo section below for the verification GIF placeholder.
 
-> **Note:** `cutlass` and `flash_infer` already default to `"n"`. This hint is mainly useful if you explicitly enabled them and hit a build error.
+---
 
-### Quantize
+## 🔧 Repair & Alignment
 
-#### `POST /quantize`
+This is the fallback path when the managed checkout of [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/) is no longer in the expected state.
 
-Quantizes (converts) raw model weights to MLC format and **streams stdout/stderr as SSE**.
+### Tracked file protection
 
-Internally this calls the mlc-cli `quantize` sub-command, which runs two steps in sequence:
-
-1. `mlc_llm convert_weight` — convert Hugging Face weights to MLC format with the selected quantization.
-2. `mlc_llm gen_config` — write the runtime config alongside the converted weights.
-
-**Pipeline position:** Run `/quantize` _after_ `/build` (which installs the `mlc-llm` Python package) and _before_ `/run`.
-
-**Request body (`model` is required; all other fields are optional):**
-
-```json
-{
-  "model": "models/Llama-3-8B",
-  "quant": "q4f16_1",
-  "device": "cuda",
-  "conv_template": "llama-3",
-  "output": ""
-}
-```
-
-| Field           | Type   | Default      | Notes                                                                                                        |
-| --------------- | ------ | ------------ | ------------------------------------------------------------------------------------------------------------ |
-| `model`         | string | _(required)_ | Path to a local model dir (e.g. `models/Llama-3-8B`). Relative paths are resolved against the workspace root |
-| `quant`         | string | `q4f16_1`    | Quantization: `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`                       |
-| `device`        | string | `cuda`       | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                                   |
-| `conv_template` | string | `llama-3`    | Conversation template: `llama-3`, `chatml`, `mistral_default`, `phi-2`, `gemma`, `qwen2`                     |
-| `output`        | string | `""`         | Output directory. If empty, mlc-cli uses `dist/<model_basename>-<quant>-MLC`                                 |
-
-**Example — quantize a Llama-3 8B model:**
+If tracked upstream source files were modified locally:
 
 ```bash
-curl -N -X POST http://localhost:8000/quantize \
-     -H 'Content-Type: application/json' \
-     -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+POST /ensure-repo-exists
 ```
 
-Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+The service restores tracked source changes while preserving untracked artifacts such as caches and build outputs.
 
-### Compile
+### Alignment to the pinned SHA
 
-#### `POST /compile`
-
-Compiles a model library and **streams stdout/stderr as SSE**.
-
-Internally this calls the mlc-cli `compile` sub-command.
-
-**Pipeline position:** Run `/compile` _after_ `/convert` and _before_ `/run`.
-
-**Request body (`model` is required; all other fields are optional):**
-
-```json
-{
-  "model": "models/Llama-3-8B",
-  "quant": "q4f16_1",
-  "device": "cuda",
-  "output": ""
-}
-```
-
-| Field    | Type   | Default   | Notes                                                                                                                  |
-| -------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `model`  | string | _(req)_   | Path to a local model dir (e.g. `dist/Llama-3-8B-q4f16_1-MLC`). Relative paths are resolved against the workspace root |
-| `quant`  | string | `q4f16_1` | Quantization: `q4f16_1`, `q0f32`, etc.                                                                                 |
-| `device` | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                                             |
-| `output` | string | `""`      | Output directory or file path. If empty, uses default                                                                  |
-
-**Example — compile a Llama-3 8B model:**
+If the local checkout exists but is not on the approved pinned commit:
 
 ```bash
-curl -N -X POST http://localhost:8000/compile \
-     -H 'Content-Type: application/json' \
-     -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+POST /ensure-repo-exists
 ```
 
-Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+The service re-aligns that checkout back to the pinned SHA.
 
-### Run
+---
 
-#### `POST /run`
+## 🧪 Test Strategy
 
-Load-tests a model by initializing the interactive REPL and **streams stdout/stderr as SSE**.
+The project uses different test layers for different goals.
 
-Internally this calls the mlc-cli `run` sub-command.
+| Layer                  | Main purpose                                  |
+| ---------------------- | --------------------------------------------- |
+| **Unit tests**         | Validate service logic quickly and locally    |
+| **CLI contract check** | Catch obvious upstream interface drift        |
+| **Smoke integration**  | Verify the basic service → upstream path      |
+| **Full integration**   | Verify the full end-to-end candidate workflow |
 
-**LIMITATION**: The upstream `mlc-cli run` command is interactive by default and does NOT support a non-interactive single-shot `--prompt` flag. When called via this API endpoint, no standard input is provided. The subprocess will initialize the model, print its ready state, and immediately exit upon encountering EOF. This effectively serves as a "load test" to verify model and compiled library compatibility.
-
-**Pipeline position:** Run `/run` _after_ `/compile` (and `/quantize`).
-
-**Request body (`model_name` is required; all other fields are optional):**
-
-```json
-{
-  "model_name": "Llama-3-8B",
-  "model_url": "",
-  "device": "cuda",
-  "profile": "default",
-  "model_lib": ""
-}
-```
-
-| Field        | Type   | Default   | Notes                                                                                           |
-| ------------ | ------ | --------- | ----------------------------------------------------------------------------------------------- |
-| `model_name` | string | _(req)_   | Model directory name in models/ (e.g. `Llama-3-8B`)                                             |
-| `model_url`  | string | `""`      | Optional Git URL to clone the model from                                                        |
-| `device`     | string | `cuda`    | Target device: `cuda`, `metal`, `vulkan`, `opencl`, `rocm`                                      |
-| `profile`    | string | `default` | Compute profile: `really-low`, `low`, `default`, `high`                                         |
-| `model_lib`  | string | `""`      | Optional path to compiled `.so` library. Relative paths are resolved against the workspace root |
-
-**Example — load test a model:**
+### Running tests locally
 
 ```bash
-curl -N -X POST http://localhost:8000/run \
-     -H 'Content-Type: application/json' \
-     -d '{"model_name": "Llama-3-8B", "device": "cuda", "profile": "default"}'
+pip install -r requirements.txt
+pytest tests/unit/ -v
+pytest tests/unit/ -v --cov=app --cov-report=term-missing
+
+docker compose up -d
+python tests/integration/test_smoke.py
+python tests/integration/test_full_pipeline.py
 ```
 
-Each SSE line is prefixed with `data: `. The stream ends with `data: [DONE]` on success or `data: [ERROR] ...` on failure.
+### Repository test summary
 
-## 🗂️ Project Structure
+```text
+=========================== Repository Test Summary ===========================
+unit tests                local service logic         ✅
+smoke integration         basic API sanity            ✅
+full integration          end-to-end pipeline         ✅
+contract check            upstream interface gate     ✅
+-------------------------------------------------------------------------------
+promotion gate            smoke + full required       ✅
+```
+
+### CI
+
+This repository currently uses two GitHub Actions workflows:
+
+1. **Push / PR CI**
+   - runs the unit test suite
+   - reports coverage
+   - provides fast feedback for service-level code changes
+
+2. **Weekly upstream drift workflow**
+   - runs every Monday at **14:00 UTC**  
+     (**10:00 AM EDT / 9:00 AM EST**)
+   - compares the pinned upstream SHA against the latest `HEAD` of [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/)
+   - runs the lightweight contract check when drift is detected
+   - records a summary on contract-check success
+   - opens an issue on contract-check failure
+
+GPU-backed and Docker-backed checks still require manual/local execution.
+
+---
+
+## 📸 Demo & Test Results
+
+### End-to-end workflow demo
+
+<p align="center">
+  <em>🧭 Placeholder: GIF showing startup → setup-check → ensure-repo-exists → successful build flow with streamed output.</em><br>
+  <img src="assets/e2e-workflow-placeholder.gif" alt="End-to-End Workflow Demo" width="700" style="max-width: 100%; border: 1px solid #ccc; border-radius: 4px; padding: 10px;">
+</p>
+
+### Upstream verification demo
+
+<p align="center">
+  <em>📹 Placeholder: GIF showing <code>verify_upstream.py</code> from preflight through smoke/full verification and successful promotion.</em><br>
+  <img src="assets/verify-workflow-placeholder.gif" alt="Verification Workflow Demo" width="700" style="max-width: 100%; border: 1px solid #ccc; border-radius: 4px; padding: 10px;">
+</p>
+
+### Drift / incident handling demo
+
+<p align="center">
+  <em>🛠️ Placeholder: GIF showing intentional upstream breakage or drift, followed by failure handling / repair behavior.</em><br>
+  <img src="assets/drift-handling-placeholder.gif" alt="Drift Handling Demo" width="700" style="max-width: 100%; border: 1px solid #ccc; border-radius: 4px; padding: 10px;">
+</p>
+
+### Test results
+
+<p align="center">
+  <em>✅ Placeholder: static screenshot or chart showing unit, smoke, full, and contract-check results.</em><br>
+  <img src="assets/test-results-placeholder.png" alt="Test Results Summary" width="700" style="max-width: 100%; border: 1px solid #ccc; padding: 10px;">
+</p>
+
+---
+
+## 📂 Project Structure
 
 ```
 .
-├── app/
-│   ├── main.py          # FastAPI application (routes)
-│   └── helpers.py       # Pure helper functions (testable without FastAPI)
-├── tests/
-│   ├── unit/            # Fast, mocked unit tests (no container needed)
-│   │   ├── conftest.py
-│   │   ├── test_health.py
-│   │   ├── test_setup_check.py
-│   │   ├── test_helpers.py
-│   │   ├── test_quantize.py
-│   │   ├── test_compile.py
-│   │   ├── test_artifacts.py
-│   │   └── test_run.py
-│   └── integration/     # Live smoke tests against running API
-│       └── test_smoke.py
-├── .github/
-│   └── workflows/
-│       └── ci.yml       # GitHub Actions CI (push + PR)
-├── Dockerfile           # CUDA 12.6 + Go 1.24 + Miniconda image
-├── docker-compose.yml   # Service definition with GPU passthrough
-├── requirements.txt     # FastAPI, Uvicorn, HTTPX, pytest, pytest-cov
+├── 📄 README.md                    # This file
+├── 📋 .upstream-sha.json           # Pinned upstream commit metadata
+├── 📋 verify_upstream.py           # Manual verification + promotion script
+│
+├── 🔌 app/
+│   ├── main.py                     # FastAPI routes & streaming endpoints
+│   └── helpers.py                  # Repo alignment and dirty-state helpers
+│
+├── 🧪 tests/
+│   ├── unit/                       # Fast mocked tests (no Docker/GPU)
+│   ├── integration/                # Smoke and full pipeline tests
+│   └── upstream/                   # CLI contract check helper
+│
+├── 🐳 Dockerfile                   # CUDA 12.6 + Go 1.24 + Miniconda
+├── 📋 docker-compose.yml           # GPU-enabled service definition
+├── 📋 pyproject.toml               # Python project metadata
+├── 📋 requirements.txt             # Dependencies (FastAPI, pytest, etc.)
+│
+├── 🖼️ assets/
+│   ├── architecture-placeholder.svg
+│   ├── e2e-workflow-placeholder.gif
+│   ├── verify-workflow-placeholder.gif
+│   ├── drift-handling-placeholder.gif
+│   └── test-results-placeholder.png
+└── ⚙️ .github/
+    └── workflows/
+        └── ci.yml                  # GitHub Actions: unit tests on push/PR
+        └── upstream-drift.yml      # Weekly upstream drift / contract-check workflow
 ```
 
-## 🧪 Running Tests Locally
+---
 
-### Unit Tests (Fast & Mocked)
+## ⚠️ Limitations
 
-No Docker, GPU, Go, or Conda needed — these tests use mocks.
+- **GPU-backed flows still need the right local environment.** Some checks can run without a GPU, but full build / inference flows depend on the proper CUDA + container setup.
+- **A passing contract check is not enough by itself.** Manual verification is still needed before promoting a new upstream SHA.
+- **Full integration is intentionally heavier.** It is slower and more resource-intensive than unit tests or lightweight checks.
+- **This repository depends on the upstream `mlc-cli` project.** If upstream behavior changes in deeper ways, you may need to investigate, verify, and re-pin before continuing.
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+---
 
-# 2. Run the unit test suite
-pytest tests/unit/ -v
+## 🤝 Contributing
 
-# 3. Run with coverage report
-pytest tests/unit/ -v --cov=app --cov-report=term-missing
-```
+Contributions are welcome. Before opening a pull request:
 
-## 🤖 CI (GitHub Actions)
+1. Add or update tests for changed behavior.
+2. Run the relevant unit and integration checks locally.
+3. Update documentation when public behavior or workflows change.
 
-The workflow in `.github/workflows/ci.yml` runs automatically on every push and pull request:
+---
 
-1. Checks out the code
-2. Sets up Python 3.12
-3. Installs `requirements.txt`
-4. Runs `pytest tests/ -v --cov=app --cov-report=term-missing`
+## 📄 License
 
-No GPU or Docker is required in CI — all tests use mocks.
-
-## 🐳 Docker Details
-
-- **Base image**: `nvidia/cuda:12.6.3-devel-ubuntu24.04`
-- **Go**: 1.24.0 (installed from upstream tarball)
-- **Conda**: Miniconda latest (used by `mlc-cli` build scripts)
-- **Python venv**: isolated at `/opt/venv` for the FastAPI app
-- **Workspace volume**: `mlc_workspace` is mounted at `/workspace` — the `mlc-cli` repo and build artefacts persist across container restarts
-
-## 🧪 Integration Smoke Test
-
-`tests/integration/test_smoke.py` is a lightweight script that interacts with the containerised API to verify endpoints are alive and routing correctly. It tests the fast "install-wheels" build path and triggers a lightweight load test.
-
-```bash
-# Requires httpx
-pip install httpx
-python tests/integration/test_smoke.py
-```
-
-It performs the following steps sequentially against the API (`http://localhost:8000`):
-
-1. **Health Check**: Validates API is up.
-2. **Setup Check**: Checks if repo is pulled.
-3. **Ensure Repo Exists**: Clones `mlc-cli` if necessary.
-4. **Repo Status**: Checks for uncommitted changes.
-5. **Fast Build**: Triggers a fast wheel-only build (`action=install-wheels`).
-6. **Artifacts**: Discovers existing models/wheels.
-7. **Run Load-Test**: Dynamically picks a local model from `/artifacts` to load-test, or gracefully skips if none are found.
-
-**Optional Environment Variables for Smoke Test:**
-
-- `RUN_MODEL_NAME`, `RUN_MODEL_URL`, `RUN_MODEL_LIB`, `RUN_DEVICE`: Manually specify the target model for `/run` instead of auto-discovering one from `/artifacts`.
-- `DOWNLOAD_RUN_MODEL_IF_MISSING=1`: If no model is provided or discovered, automatically download and load-test `TinyLlama-1.1B` to forcefully test `/run` instead of skipping it.
-
-## 🏗️ Full Pipeline Integration Test
-
-`tests/integration/test_full_pipeline.py` is a heavy, manual end-to-end integration test that exercises the entire `mlc-cli` workflow. It sequentially tests the build, quantize, compile, artifact verification, and run load-test stages.
-
-**Important:** The FastAPI application must already be running locally at `http://localhost:8000` before executing this test.
-
-Since it takes significant time and resources, it is separate from the lightweight smoke test. It requires a raw unquantized Hugging Face model to quantize. By default, it will automatically clone a lightweight raw model (`TinyLlama`) into a local `.raw_model_cache` folder for testing, or you can provide your own explicitly.
-
-**Disk Space Note:** This test may use several GBs of disk space due to the raw model cache, quantized model outputs, compiled artifacts, and related caches.
-
-```bash
-# Required tools for the auto-download fallback:
-pip install httpx
-# Ensure `git` and `git-lfs` are installed on your system.
-
-# Option A: Run automatically (will automatically clone and cache a small raw TinyLlama model locally if needed)
-python tests/integration/test_full_pipeline.py
-
-# Option B: Provide the path to your own raw unquantized model weights
-export FULL_RAW_MODEL=/path/to/local/hf/weights
-python tests/integration/test_full_pipeline.py
-```
-
-**Cleanup**
-If you rely on the auto-downloaded fallback (Option A) and want the script to delete the cloned raw model folder from your disk after the test completes, run it with:
-
-```bash
-CLEANUP_FULL_MODEL=1 python tests/integration/test_full_pipeline.py
-```
-
-_(Note: Cleanup only removes the `.raw_model_cache` if it was freshly downloaded during this specific run; it will not delete a previously reused cache)._
-
-**Optional overrides:**
-
-- `FULL_BUILD_ACTION` (default: `install-wheels`)
-- `FULL_CONV_TEMPLATE`: Usually auto-detected from path/config. Use to override.
-- `FULL_QUANT` (default: `q4f16_1`)
-- `FULL_DEVICE` (default: `cuda`)
+MIT License — see [LICENSE](LICENSE) for details.
