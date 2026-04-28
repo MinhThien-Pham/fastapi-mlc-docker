@@ -90,3 +90,15 @@ def test_unload_engine(mock_mlc_llm):
 
     engine_instance.terminate.assert_called_once()
     assert chat_engine_manager.get_status()["loaded"] is False
+
+
+def test_unload_engine_terminate_failure(mock_mlc_llm):
+    chat_engine_manager.load_engine(model="test_model", model_lib="test_lib", device="cuda:0")
+    engine_instance = mock_mlc_llm.return_value
+    engine_instance.terminate.side_effect = RuntimeError("Failed to free resources")
+
+    with pytest.raises(RuntimeError, match="Failed to free resources"):
+        chat_engine_manager.unload_engine()
+
+    # Crucially, the state MUST still be cleared!
+    assert chat_engine_manager.get_status()["loaded"] is False

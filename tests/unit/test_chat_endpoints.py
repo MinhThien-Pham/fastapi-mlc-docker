@@ -108,3 +108,48 @@ def test_load_initialization_error(client, mock_mlc_llm):
     
     assert response.status_code == 500
     assert "CUDA out of memory" in response.json()["detail"]
+
+
+def test_unload_success(client, mock_mlc_llm):
+    # Load first
+    client.post("/chat/load", json={
+        "model": "/valid/model/dir",
+        "model_lib": "/valid/lib.so"
+    })
+    
+    # Unload
+    response = client.post("/chat/unload")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    
+    # Status should be false
+    status_resp = client.get("/chat/status")
+    assert status_resp.json()["loaded"] is False
+
+
+def test_unload_when_not_loaded(client):
+    # Unloading when nothing is loaded should be safe
+    response = client.post("/chat/unload")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_unload_failure_still_clears_state(client, mock_mlc_llm):
+    # Load first
+    client.post("/chat/load", json={
+        "model": "/valid/model/dir",
+        "model_lib": "/valid/lib.so"
+    })
+    
+    # Make terminate throw an exception
+    engine_instance = mock_mlc_llm.return_value
+    engine_instance.terminate.side_effect = Exception("Failed to free GPU memory")
+    
+    # We still return 500 because the operation had an error
+    response = client.post("/chat/unload")
+    assert response.status_code == 500
+    assert "Failed to free GPU memory" in response.json()["detail"]
+    
+    # BUT the internal state must be cleared anyway!
+    status_resp = client.get("/chat/status")
+    assert status_resp.json()["loaded"] is False

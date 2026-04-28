@@ -215,6 +215,19 @@ def chat_status():
     return chat_engine_manager.get_status()
 
 
+@app.post("/chat/unload")
+def chat_unload():
+    """
+    Unload the active MLCEngine, freeing its resources.
+    Safe to call even if no engine is currently loaded.
+    """
+    try:
+        chat_engine_manager.unload_engine()
+        return {"status": "success", "message": "Engine unloaded"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unload engine: {str(e)}")
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/")
