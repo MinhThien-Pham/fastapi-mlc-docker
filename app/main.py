@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from app import chat_engine_manager
 
 from app.helpers import (
     build_compile_command,
@@ -37,7 +39,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[BOOT] Failed to perform startup repo alignment check: {e}")
 
-    yield
+    try:
+        yield
+    finally:
+        try:
+            chat_engine_manager.unload_engine()
+            print("[BOOT] Chat engine unloaded cleanly during shutdown.")
+        except Exception as e:
+            print(f"[BOOT] Error unloading chat engine during shutdown: {e}")
 
 
 app = FastAPI(title="FastAPI MLC-CLI", lifespan=lifespan)
@@ -155,6 +164,13 @@ class CompileRequest(BaseModel):
     output: str = ""
 
 
+class ChatLoadRequest(BaseModel):
+    """Request body for POST /chat/load to initialize the direct MLCEngine."""
+    model: str
+    model_lib: str
+    device: str = "cuda:0"
+
+
 class RunRequest(BaseModel):
     """Request body for POST /run."""
     model_name: str
@@ -162,6 +178,41 @@ class RunRequest(BaseModel):
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
     profile: Literal["really-low", "low", "default", "high"] = "default"
     model_lib: str = ""
+
+
+# ── Chat Engine Endpoints ─────────────────────────────────────────────────────
+
+@app.post("/chat/load")
+def chat_load(req: ChatLoadRequest):
+    """
+    Load the MLCEngine with the specified model and library.
+    This is an explicit initialization step before any completions can be requested.
+    """
+    try:
+        chat_engine_manager.load_engine(
+            model=req.model,
+            model_lib=req.model_lib,
+            device=req.device
+        )
+        return {"status": "success", "message": f"Engine loaded for model {req.model}"}
+    except chat_engine_manager.InvalidArtifactPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except chat_engine_manager.EngineConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except chat_engine_manager.EngineImportError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except chat_engine_manager.EngineInitializationError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load engine: {str(e)}")
+
+
+@app.get("/chat/status")
+def chat_status():
+    """
+    Return the current status of the loaded chat engine.
+    """
+    return chat_engine_manager.get_status()
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
