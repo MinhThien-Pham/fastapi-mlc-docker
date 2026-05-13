@@ -1,7 +1,7 @@
 """
 tests/unit/test_chat_completions.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Focused tests for POST /chat/completions.
+Focused tests for POST /chat/completions — both non-streaming and streaming.
 
 All engine interaction is mocked; no GPU or real runtime required.
 """
@@ -245,3 +245,177 @@ def test_completion_engine_returns_null_content(client, loaded_engine):
 
     assert response.status_code == 500
     assert "null content" in response.json()["detail"].lower()
+
+
+# ── Streaming helpers ──────────────────────────────────────────────────────────
+
+def _parse_sse_lines(text: str) -> list[str]:
+    """Return the data payloads from a raw SSE response body."""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            lines.append(line[len("data: "):])
+    return lines
+
+
+def _make_async_gen(*items):
+    """Return an async generator factory that yields the given items.
+
+    The factory accepts and ignores any kwargs so it can be used as a
+    ``side_effect`` on a mock that is called with keyword arguments.
+    """
+    async def _gen(**_kwargs):
+        for item in items:
+            yield item
+    return _gen
+
+
+# ── Streaming: success path ────────────────────────────────────────────────────
+
+def test_stream_returns_sse_response(client, loaded_engine):
+    """stream=true → 200 with text/event-stream content-type."""
+    with patch.object(
+        __import__("app.chat_engine_manager", fromlist=["stream_completion"]),
+        "stream_completion",
+        side_effect=_make_async_gen("Hello", ", ", "world", "!"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+
+
+def test_stream_chunks_contain_deltas(client, loaded_engine):
+    """Each yielded delta appears as a data: {"delta": ...} SSE event."""
+    import json
+
+    with patch.object(
+        __import__("app.chat_engine_manager", fromlist=["stream_completion"]),
+        "stream_completion",
+        side_effect=_make_async_gen("Hello", ", world"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+    payloads = _parse_sse_lines(response.text)
+
+    # Last event must be [DONE]; all others must be JSON {"delta": ...}
+    assert payloads[-1] == "[DONE]"
+    delta_payloads = payloads[:-1]
+    assert len(delta_payloads) == 2
+
+    assert json.loads(delta_payloads[0]) == {"delta": "Hello"}
+    assert json.loads(delta_payloads[1]) == {"delta": ", world"}
+
+
+def test_stream_ends_with_done(client, loaded_engine):
+    """The SSE stream always terminates with data: [DONE]."""
+    with patch.object(
+        __import__("app.chat_engine_manager", fromlist=["stream_completion"]),
+        "stream_completion",
+        side_effect=_make_async_gen("token"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={"messages": [{"role": "user", "content": "ping"}], "stream": True},
+        )
+
+    payloads = _parse_sse_lines(response.text)
+    assert payloads[-1] == "[DONE]"
+
+
+def test_stream_passes_generation_params(client, loaded_engine):
+    """Generation params are forwarded to stream_completion."""
+    import app.chat_engine_manager as mgr
+
+    with patch.object(mgr, "stream_completion", side_effect=_make_async_gen()) as mock_sc:
+        client.post(
+            "/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 64,
+                "temperature": 0.5,
+                "top_p": 0.8,
+                "stream": True,
+            },
+        )
+
+    mock_sc.assert_called_once_with(
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        temperature=0.5,
+        top_p=0.8,
+    )
+
+
+# ── Streaming: no engine loaded ────────────────────────────────────────────────
+
+def test_stream_no_engine_loaded(client):
+    """No engine → error event emitted in stream, then [DONE]."""
+    import json
+
+    # Engine is not loaded (reset_manager_state autouse fixture ensures this)
+    response = client.post(
+        "/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
+    )
+
+    assert response.status_code == 200  # HTTP layer is 200; error is in the stream
+    payloads = _parse_sse_lines(response.text)
+    assert payloads[-1] == "[DONE]"
+
+    error_payload = json.loads(payloads[0])
+    assert "error" in error_payload
+    assert "No engine is loaded" in error_payload["error"]
+
+
+# ── Streaming: engine failure mid-stream ───────────────────────────────────────
+
+def test_stream_engine_failure_emits_error_event(client, loaded_engine):
+    """Engine raising during streaming → error event in stream, then [DONE]."""
+    import json
+    from app.chat_engine_manager import EngineStreamError
+
+    async def _failing_gen(**_kwargs):
+        yield "partial"
+        raise EngineStreamError("GPU died mid-stream")
+
+    with patch.object(
+        __import__("app.chat_engine_manager", fromlist=["stream_completion"]),
+        "stream_completion",
+        side_effect=_failing_gen,
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+    payloads = _parse_sse_lines(response.text)
+    assert payloads[-1] == "[DONE]"
+
+    # First payload is the partial delta, second is the error
+    assert json.loads(payloads[0]) == {"delta": "partial"}
+    error_payload = json.loads(payloads[1])
+    assert "error" in error_payload
+    assert "GPU died mid-stream" in error_payload["error"]
+
+
+# ── Streaming: stream=false default still works ────────────────────────────────
+
+def test_stream_false_default_unchanged(client, loaded_engine):
+    """Omitting stream (or stream=false) still returns the original JSON shape."""
+    response = client.post(
+        "/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "chat.completion"
+    assert body["choices"][0]["message"]["role"] == "assistant"
+    assert body["choices"][0]["finish_reason"] == "stop"

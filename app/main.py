@@ -181,13 +181,14 @@ class ChatCompletionRequest(BaseModel):
     """Request body for POST /chat/completions.
 
     Only the fields needed right now are included.  This model is deliberately
-    kept small so it is easy to extend later (streaming flag, more sampling
-    params, stop sequences, etc.) without breaking callers.
+    kept small so it is easy to extend later (more sampling params, stop
+    sequences, etc.) without breaking callers.
     """
     messages: list[ChatMessage]
     max_tokens: int = 512
     temperature: float = 1.0
     top_p: float = 1.0
+    stream: bool = False
 
 
 class RunRequest(BaseModel):
@@ -248,20 +249,34 @@ def chat_unload():
 
 
 @app.post("/chat/completions")
-def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest):
     """
-    Run a non-streaming chat completion against the currently loaded engine.
+    Run a chat completion against the currently loaded engine.
 
     The engine must already be loaded via ``POST /chat/load`` before calling
     this endpoint.  Pass a list of messages (role + content) and optional
-    generation parameters; receive a single assistant reply.
+    generation parameters.
 
-    Example::
+    - ``stream=false`` (default): waits for the full reply and returns JSON.
+    - ``stream=true``: returns a Server-Sent Events stream.  Each event is
+      ``data: {"delta": "<text>"}``.  The stream ends with ``data: [DONE]``.
+      On error, a ``data: {"error": "<message>"}`` event is emitted before
+      ``data: [DONE]`` so the client always sees a clean stream termination.
 
+    Examples::
+
+        # non-streaming
         curl -s -X POST http://localhost:8000/chat/completions \\
              -H 'Content-Type: application/json' \\
              -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
+
+        # streaming
+        curl -N -X POST http://localhost:8000/chat/completions \\
+             -H 'Content-Type: application/json' \\
+             -d '{"messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
     """
+    import json as _json
+
     # ── Basic payload validation ──────────────────────────────────────────────
     if not req.messages:
         raise HTTPException(
@@ -284,7 +299,37 @@ def chat_completions(req: ChatCompletionRequest):
     # ── Serialise to plain dicts for the engine ───────────────────────────────
     messages_dicts = [{"role": m.role, "content": m.content} for m in req.messages]
 
-    # ── Call the engine ───────────────────────────────────────────────────────
+    # ── Streaming path ────────────────────────────────────────────────────────
+    if req.stream:
+        async def _sse_generator():
+            try:
+                async for delta in chat_engine_manager.stream_completion(
+                    messages=messages_dicts,
+                    max_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                ):
+                    yield f"data: {_json.dumps({'delta': delta})}\n\n"
+            except (
+                chat_engine_manager.EngineNotLoadedError,
+                chat_engine_manager.EngineStreamError,
+            ) as exc:
+                yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+            except Exception as exc:
+                yield f"data: {_json.dumps({'error': f'Unexpected error: {exc}'})}\n\n"
+            finally:
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _sse_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── Non-streaming path (unchanged) ────────────────────────────────────────
     try:
         reply = chat_engine_manager.generate_completion(
             messages=messages_dicts,
@@ -301,7 +346,7 @@ def chat_completions(req: ChatCompletionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error during generation: {str(e)}")
 
-    # ── Response ──────────────────────────────────────────────────────────────
+    # ── Non-streaming response ────────────────────────────────────────────────
     # Lean envelope — forward-compatible: add 'id', 'model', 'usage', etc. later.
     return {
         "object": "chat.completion",

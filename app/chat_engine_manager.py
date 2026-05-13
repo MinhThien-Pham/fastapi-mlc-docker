@@ -1,6 +1,6 @@
 import os
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 # We use loose typing here because mlc_llm might not be installed in all environments.
 _engine_instance: Any = None
@@ -34,6 +34,11 @@ class EngineNotLoadedError(Exception):
 
 class EngineGenerationError(Exception):
     """Raised when the engine fails during token generation."""
+    pass
+
+
+class EngineStreamError(Exception):
+    """Raised when the engine fails or produces unexpected output during streaming."""
     pass
 
 
@@ -170,3 +175,73 @@ def generate_completion(
         raise EngineGenerationError("Engine returned a null content field.")
 
     return content
+
+
+async def stream_completion(
+    messages: list,
+    max_tokens: int = 512,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+) -> AsyncIterator[str]:
+    """
+    Yield content-delta strings from a streaming chat completion.
+
+    The engine is called with ``stream=True``.  For each chunk the engine
+    yields, the content delta from the first choice is extracted and
+    yielded to the caller.  Empty deltas (e.g. the final ``finish_reason``
+    chunk) are skipped silently.
+
+    Parameters
+    ----------
+    messages:
+        List of dicts with ``role`` and ``content`` keys.
+    max_tokens:
+        Maximum tokens to generate.
+    temperature:
+        Sampling temperature.
+    top_p:
+        Nucleus sampling probability mass.
+
+    Yields
+    ------
+    str
+        Each non-empty content delta from the engine.
+
+    Raises
+    ------
+    EngineNotLoadedError
+        If no engine has been loaded yet (raised before any iteration).
+    EngineStreamError
+        If the engine raises during iteration or produces an unexpected
+        chunk structure.
+    """
+    if _engine_instance is None:
+        raise EngineNotLoadedError(
+            "No engine is loaded. Call POST /chat/load before requesting completions."
+        )
+
+    try:
+        chunks = _engine_instance.chat.completions.create(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=True,
+        )
+    except Exception as e:
+        raise EngineStreamError(f"Engine failed to start streaming: {str(e)}") from e
+
+    try:
+        for chunk in chunks:
+            try:
+                delta = chunk.choices[0].delta.content
+            except (AttributeError, IndexError) as e:
+                raise EngineStreamError(
+                    f"Engine returned an unexpected chunk structure: {str(e)}"
+                ) from e
+            if delta:  # skip empty / finish-reason-only chunks
+                yield delta
+    except EngineStreamError:
+        raise
+    except Exception as e:
+        raise EngineStreamError(f"Engine stream interrupted: {str(e)}") from e
