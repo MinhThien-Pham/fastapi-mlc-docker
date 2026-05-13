@@ -3,7 +3,20 @@
 # Coverage requires a native Linux filesystem for its SQLite database.
 # Run with coverage from WSL or inside the container only:
 #   pytest --cov=app --cov-report=term-missing
+#
+# Run only unit tests (fast, no GPU):
+#   pytest -m "not integration"
+#
+# Run integration lifecycle proof (mocked engine, no GPU):
+#   pytest tests/integration/test_chat_lifecycle.py -v
+#
+# Run GPU-required tests only:
+#   pytest -m gpu
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end lifecycle tests (may use mocks or real resources)",
+    "gpu: tests that require a real GPU and loaded mlc_llm engine",
+]
 
 [tool.coverage.run]
 source = ["app"]
