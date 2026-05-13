@@ -171,6 +171,25 @@ class ChatLoadRequest(BaseModel):
     device: str = "cuda:0"
 
 
+class ChatMessage(BaseModel):
+    """A single message in a chat conversation."""
+    role: str   # "system" | "user" | "assistant"
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    """Request body for POST /chat/completions.
+
+    Only the fields needed right now are included.  This model is deliberately
+    kept small so it is easy to extend later (streaming flag, more sampling
+    params, stop sequences, etc.) without breaking callers.
+    """
+    messages: list[ChatMessage]
+    max_tokens: int = 512
+    temperature: float = 1.0
+    top_p: float = 1.0
+
+
 class RunRequest(BaseModel):
     """Request body for POST /run."""
     model_name: str
@@ -226,6 +245,75 @@ def chat_unload():
         return {"status": "success", "message": "Engine unloaded"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to unload engine: {str(e)}")
+
+
+@app.post("/chat/completions")
+def chat_completions(req: ChatCompletionRequest):
+    """
+    Run a non-streaming chat completion against the currently loaded engine.
+
+    The engine must already be loaded via ``POST /chat/load`` before calling
+    this endpoint.  Pass a list of messages (role + content) and optional
+    generation parameters; receive a single assistant reply.
+
+    Example::
+
+        curl -s -X POST http://localhost:8000/chat/completions \\
+             -H 'Content-Type: application/json' \\
+             -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
+    """
+    # ── Basic payload validation ──────────────────────────────────────────────
+    if not req.messages:
+        raise HTTPException(
+            status_code=422,
+            detail="messages must be a non-empty list.",
+        )
+
+    for i, msg in enumerate(req.messages):
+        if not msg.role.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=f"messages[{i}].role must not be blank.",
+            )
+        if not msg.content.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=f"messages[{i}].content must not be blank.",
+            )
+
+    # ── Serialise to plain dicts for the engine ───────────────────────────────
+    messages_dicts = [{"role": m.role, "content": m.content} for m in req.messages]
+
+    # ── Call the engine ───────────────────────────────────────────────────────
+    try:
+        reply = chat_engine_manager.generate_completion(
+            messages=messages_dicts,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+        )
+    except chat_engine_manager.EngineNotLoadedError as e:
+        # 503 Service Unavailable: the service exists but the engine isn't ready
+        raise HTTPException(status_code=503, detail=str(e))
+    except chat_engine_manager.EngineGenerationError as e:
+        # 500 Internal Server Error: the engine is loaded but generation failed
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error during generation: {str(e)}")
+
+    # ── Response ──────────────────────────────────────────────────────────────
+    # Lean envelope — forward-compatible: add 'id', 'model', 'usage', etc. later.
+    return {
+        "object": "chat.completion",
+        "model": chat_engine_manager.get_status().get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": reply},
+                "finish_reason": "stop",
+            }
+        ],
+    }
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

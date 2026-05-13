@@ -27,6 +27,16 @@ class EngineInitializationError(Exception):
     pass
 
 
+class EngineNotLoadedError(Exception):
+    """Raised when a generation is requested but no engine is currently loaded."""
+    pass
+
+
+class EngineGenerationError(Exception):
+    """Raised when the engine fails during token generation."""
+    pass
+
+
 class InvalidArtifactPathError(Exception):
     """Raised when the provided model or model_lib paths do not exist locally."""
     pass
@@ -98,3 +108,65 @@ def unload_engine() -> None:
                 _loaded_model = None
                 _loaded_model_lib = None
                 _loaded_device = None
+
+
+def generate_completion(
+    messages: list,
+    max_tokens: int = 512,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+) -> str:
+    """
+    Run a single non-streaming chat completion against the loaded engine.
+
+    Parameters
+    ----------
+    messages:
+        List of dicts with ``role`` and ``content`` keys, e.g.
+        [{"role": "user", "content": "Hello"}].
+    max_tokens:
+        Maximum number of tokens to generate.
+    temperature:
+        Sampling temperature (1.0 = default; lower = more deterministic).
+    top_p:
+        Nucleus sampling probability mass.
+
+    Returns
+    -------
+    str
+        The assistant's reply text from the first (and only) choice.
+
+    Raises
+    ------
+    EngineNotLoadedError
+        If no engine has been loaded yet.
+    EngineGenerationError
+        If the engine raises during generation or returns an empty response.
+    """
+    if _engine_instance is None:
+        raise EngineNotLoadedError(
+            "No engine is loaded. Call POST /chat/load before requesting completions."
+        )
+
+    try:
+        response = _engine_instance.chat.completions.create(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=False,
+        )
+    except Exception as e:
+        raise EngineGenerationError(f"Engine generation failed: {str(e)}") from e
+
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError) as e:
+        raise EngineGenerationError(
+            f"Engine returned an unexpected response structure: {str(e)}"
+        ) from e
+
+    if content is None:
+        raise EngineGenerationError("Engine returned a null content field.")
+
+    return content
