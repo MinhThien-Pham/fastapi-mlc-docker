@@ -36,11 +36,12 @@ The upstream `mlc-cli` project handles the actual MLC build and model workflow. 
 - **Pinned upstream management** so the service does not silently drift to an unverified upstream commit
 - **Verification and promotion tooling** before accepting a newer upstream version
 - **Repair / re-alignment utilities** when the local upstream checkout drifts from the approved state
+- **Direct local chat** via the MLC-LLM Python engine, once a model has been built and compiled
 
 In short:
 
 > `ballinyouup/mlc-cli` is the upstream tool.  
-> This repository is the API + safety layer around that tool.
+> This repository is the API + safety layer around that tool, plus a practical local chat path on top of the compiled artifacts.
 
 ---
 
@@ -236,13 +237,13 @@ The long-running pipeline endpoints stream output with **Server-Sent Events (SSE
 
 ### Utility endpoints
 
-| Method | Endpoint              | Purpose                                                                                                   |
-| ------ | --------------------- | --------------------------------------------------------------------------------------------------------- |
-| `GET`  | `/health`             | Service health check                                                                                      |
-| `GET`  | `/setup-check`        | Verify environment readiness                                                                              |
+| Method | Endpoint              | Purpose                                                                                                         |
+| ------ | --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`             | Service health check                                                                                            |
+| `GET`  | `/setup-check`        | Verify environment readiness                                                                                    |
 | `POST` | `/ensure-repo-exists` | Create or repair the managed checkout of [`ballinyouup/mlc-cli`](https://github.com/ballinyouup/mlc-cli/) |
-| `GET`  | `/repo-status`        | Show alignment / dirty-state status for the managed upstream checkout                                     |
-| `GET`  | `/artifacts`          | Discover built wheels, converted models, and compiled libraries                                           |
+| `GET`  | `/repo-status`        | Show alignment / dirty-state status for the managed upstream checkout                                         |
+| `GET`  | `/artifacts`          | Discover built wheels, converted models, and compiled libraries                                               |
 
 ### Build pipeline endpoints
 
@@ -252,6 +253,28 @@ The long-running pipeline endpoints stream output with **Server-Sent Events (SSE
 | `POST` | `/quantize` | Convert model weights to MLC format | SSE stream |
 | `POST` | `/compile`  | Compile the model library           | SSE stream |
 | `POST` | `/run`      | Load-test model initialization      | SSE stream |
+
+> **Note on `/run`:** This endpoint spawns the upstream `mlc-cli run` REPL, which
+> exits immediately when no stdin is provided. It is useful for verifying that a
+> compiled model loads cleanly on the target hardware. It is **not** the chat API.
+
+### Chat endpoints
+
+Once a model has been built and compiled, you can chat with it directly without
+going through the Go CLI. The chat path uses the MLC-LLM Python engine directly.
+
+| Method | Endpoint              | Purpose                                                    |
+| ------ | --------------------- | ---------------------------------------------------------- |
+| `POST` | `/chat/load`          | Load a compiled model into GPU memory                      |
+| `GET`  | `/chat/status`        | Check whether an engine is loaded and ready                |
+| `POST` | `/chat/completions`   | Send a message array, receive a reply (streaming or not)   |
+| `POST` | `/chat/unload`        | Free the engine and release GPU memory                     |
+
+The engine must be explicitly loaded before sending completions. The server
+holds no conversation history — clients send the full `messages` array each
+request (same pattern as the OpenAI API). See
+[`docs/architecture/chat-direction.md`](docs/architecture/chat-direction.md)
+for the full rationale and known limitations.
 
 For full request/response schemas, use the OpenAPI docs when the service is running:
 
@@ -406,12 +429,17 @@ GPU-backed and Docker-backed checks still require manual/local execution.
 │
 ├── 🔌 app/
 │   ├── main.py                     # FastAPI routes & streaming endpoints
+│   ├── chat_engine_manager.py      # Direct MLCEngine lifecycle (load/chat/unload)
 │   └── helpers.py                  # Repo alignment and dirty-state helpers
 │
 ├── 🧪 tests/
 │   ├── unit/                       # Fast mocked tests (no Docker/GPU)
-│   ├── integration/                # Smoke and full pipeline tests
+│   ├── integration/                # Smoke, pipeline, and chat lifecycle tests
 │   └── upstream/                   # CLI contract check helper
+│
+├── 📚 docs/
+│   └── architecture/
+│       └── chat-direction.md       # Why and how the direct-engine chat path works
 │
 ├── 🐳 Dockerfile                   # CUDA 12.6 + Go 1.24 + Miniconda
 ├── 📋 docker-compose.yml           # GPU-enabled service definition
@@ -438,6 +466,8 @@ GPU-backed and Docker-backed checks still require manual/local execution.
 - **A passing contract check is not enough by itself.** Manual verification is still needed before promoting a new upstream SHA.
 - **Full integration is intentionally heavier.** It is slower and more resource-intensive than unit tests or lightweight checks.
 - **This repository depends on the upstream `mlc-cli` project.** If upstream behavior changes in deeper ways, you may need to investigate, verify, and re-pin before continuing.
+- **The chat path requires `mlc_llm` to be installed.** If the MLC wheels have not been built and installed into the FastAPI Python environment, `POST /chat/load` will return `503`. Run the build pipeline first.
+- **The chat path is single-user only.** One model at a time, no concurrent-request serialization. Suitable for local/dev use.
 
 ---
 
