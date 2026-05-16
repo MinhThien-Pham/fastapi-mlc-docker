@@ -84,6 +84,10 @@ async def stream_subprocess(command: list[str], cwd: Path | None = None) -> Asyn
     hint_emitted = False  # emit at most one hint per build run
     async for raw_line in proc.stdout:
         line = raw_line.decode(errors="replace").rstrip()
+        if not line:
+            # Skip blank / whitespace-only lines — they produce noisy "data: "
+            # events in terminal demos without conveying any useful information.
+            continue
         yield f"data: {line}\n\n"
 
         if not hint_emitted:
