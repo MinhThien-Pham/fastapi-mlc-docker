@@ -24,33 +24,26 @@ def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
 
 
 class TestVerifyUpstreamDirtyGuard:
-    """Tracked Bryan changes are restored before verification continues."""
+    """Tracked Bryan changes are restored before verification continues.
+
+    The managed mlc-cli repo lives inside a Docker-managed named volume
+    (/workspace/mlc-cli) and is NOT present on the host filesystem.
+    preflight() must check the container's repo state, not the host path.
+    """
 
     @patch("verify_upstream.try_restore_metadata")
-    @patch("verify_upstream.restore_tracked_changes")
-    @patch("verify_upstream.get_git_dirty_state")
+    @patch("verify_upstream.restore_container_tracked_changes")
+    @patch("verify_upstream.get_container_dirty_state")
     @patch("verify_upstream.sh")
     def test_preflight_restores_tracked_dirty_before_recovery(self, mock_sh, mock_dirty, mock_cleanup, mock_restore):
         mock_dirty.return_value = {
             "exists": True,
             "tracked_dirty": True,
-            "tracked_changes": [" M app/main.py"],
+            "tracked_changes": [" M scripts/linux_install_mlc.sh"],
             "untracked_files": ["scratch.txt"],
             "error": None,
         }
-        mock_cleanup.return_value = {
-            "ok": True,
-            "restored": True,
-            "before": mock_dirty.return_value,
-            "after": {
-                "exists": True,
-                "tracked_dirty": False,
-                "tracked_changes": [],
-                "untracked_files": ["scratch.txt"],
-                "error": None,
-            },
-            "error": None,
-        }
+        mock_cleanup.return_value = {"ok": True, "error": None}
         mock_restore.return_value = True
 
         def fake_sh(cmd):
@@ -75,8 +68,8 @@ class TestVerifyUpstreamDirtyGuard:
         mock_restore.assert_called_once()
 
     @patch("verify_upstream.try_restore_metadata")
-    @patch("verify_upstream.restore_tracked_changes")
-    @patch("verify_upstream.get_git_dirty_state")
+    @patch("verify_upstream.restore_container_tracked_changes")
+    @patch("verify_upstream.get_container_dirty_state")
     @patch("verify_upstream.sh")
     def test_preflight_untracked_only_skips_cleanup(self, mock_sh, mock_dirty, mock_cleanup, mock_restore):
         mock_dirty.return_value = {
@@ -107,6 +100,52 @@ class TestVerifyUpstreamDirtyGuard:
             verify_upstream.preflight()
 
         mock_cleanup.assert_not_called()
+
+    @patch("verify_upstream.try_restore_metadata")
+    @patch("verify_upstream.restore_container_tracked_changes")
+    @patch("verify_upstream.get_container_dirty_state")
+    @patch("verify_upstream.sh")
+    def test_preflight_uses_container_dirty_check_not_host_path(
+        self, mock_sh, mock_get_container_dirty, mock_restore_container, mock_restore_metadata
+    ):
+        """Regression guard: preflight must check the container repo, not a host path.
+
+        /workspace/mlc-cli is inside a Docker-managed named volume and does NOT
+        exist on the host filesystem.  If the old host-side check were still in
+        place, get_container_dirty_state would never be called and a dirty
+        container repo would silently slip through preflight undetected.
+        """
+        mock_get_container_dirty.return_value = {
+            "exists": False,  # simulate repo not yet cloned in container
+            "tracked_dirty": False,
+            "tracked_changes": [],
+            "untracked_files": [],
+            "error": None,
+        }
+        mock_restore_metadata.return_value = True
+
+        def fake_sh(cmd):
+            if cmd[:4] == ["docker", "compose", "ps", "--status"]:
+                return _proc(stdout="web\n")
+            if cmd[:3] == ["git", "status", "--porcelain"]:
+                return _proc(stdout="")
+            if cmd[:3] == ["git", "branch", "--show-current"]:
+                return _proc(stdout="main\n")
+            return _proc(stdout="")
+
+        mock_sh.side_effect = fake_sh
+
+        with patch.object(httpx, "get") as mock_httpx_get:
+            mock_response = MagicMock()
+            mock_response.raise_for_status.return_value = None
+            mock_httpx_get.return_value = mock_response
+
+            verify_upstream.preflight()
+
+        # The container-aware helper must have been called (not the old host path one)
+        mock_get_container_dirty.assert_called_once()
+        # No restore needed when repo is absent / clean
+        mock_restore_container.assert_not_called()
 
 
 class TestVerifyUpstreamFailureRollback:
@@ -265,9 +304,10 @@ class TestVerifyUpstreamFailureRollback:
         mock_preflight.assert_called_once_with(want_push=False)
         mock_marker.unlink.assert_called_once()
 
+
     @patch("verify_upstream.try_restore_metadata")
-    @patch("verify_upstream.restore_tracked_changes")
-    @patch("verify_upstream.get_git_dirty_state")
+    @patch("verify_upstream.restore_container_tracked_changes")
+    @patch("verify_upstream.get_container_dirty_state")
     @patch("verify_upstream.sh")
     def test_preflight_allows_clean_repo(self, mock_sh, mock_dirty, mock_cleanup, mock_restore):
         mock_dirty.return_value = {

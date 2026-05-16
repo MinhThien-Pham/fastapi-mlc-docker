@@ -16,7 +16,7 @@ Usage:
 import argparse, json, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
-from app.helpers import get_git_dirty_state, restore_tracked_changes, try_restore_metadata
+from app.helpers import try_restore_metadata
 
 METADATA = Path(".upstream-sha.json")
 RECOVERY_MARKER = Path(".upstream-verify-recovery.json")
@@ -41,22 +41,96 @@ def commits_ahead_of_remote():
     r = sh(["git", "rev-list", "--count", "origin/main..HEAD"])
     return int(r.stdout.strip()) if r.returncode == 0 else -1
 
+
+CONTAINER_MLC_PATH = "/workspace/mlc-cli"
+
+
+def get_container_dirty_state():
+    """Return tracked-dirty state for the container's mlc-cli checkout.
+
+    ``/workspace/mlc-cli`` lives inside a Docker-managed named volume and is
+    NOT present on the host filesystem, so the host-side ``get_git_dirty_state``
+    helper cannot reach it.  This function runs the equivalent ``git status``
+    command via ``docker compose exec`` instead.
+
+    Returns a dict with the same shape as ``get_git_dirty_state``.
+    """
+    result = {
+        "exists": False,
+        "tracked_dirty": False,
+        "tracked_changes": [],
+        "untracked_files": [],
+        "error": None,
+    }
+    # Check that the path exists inside the container
+    exist_check = sh(
+        ["docker", "compose", "exec", "-T", "web",
+         "bash", "-c", f"test -d {CONTAINER_MLC_PATH} && echo exists"]
+    )
+    if exist_check.returncode != 0 or "exists" not in exist_check.stdout:
+        return result  # repo not present in container
+    result["exists"] = True
+
+    status = sh(
+        ["docker", "compose", "exec", "-T", "web",
+         "bash", "-c",
+         f"cd {CONTAINER_MLC_PATH} && git status --porcelain"]
+    )
+    if status.returncode != 0:
+        result["tracked_dirty"] = True
+        result["error"] = status.stderr.strip() or "git status failed in container"
+        return result
+
+    tracked, untracked = [], []
+    for raw in status.stdout.splitlines():
+        line = raw.strip("\n")
+        if not line:
+            continue
+        if line.startswith("?? "):
+            untracked.append(line[3:])
+        elif line.startswith("!! "):
+            continue
+        else:
+            tracked.append(line)
+    result["tracked_changes"] = tracked
+    result["untracked_files"] = untracked
+    result["tracked_dirty"] = bool(tracked)
+    return result
+
+
+def restore_container_tracked_changes():
+    """Run ``git restore`` inside the container to undo tracked modifications."""
+    r = sh(
+        ["docker", "compose", "exec", "-T", "web",
+         "bash", "-c",
+         f"cd {CONTAINER_MLC_PATH} && git restore --staged --worktree -- ."]
+    )
+    if r.returncode != 0:
+        return {"ok": False, "error": r.stderr.strip() or "git restore failed in container"}
+    return {"ok": True, "error": None}
+
+
 def preflight(want_push=False):
     print("=== Preflight Checks ===\n")
 
-    # 1. Restore tracked Bryan repo changes before any recovery or network work
-    dirty = get_git_dirty_state(Path("/workspace/mlc-cli"))
+    # 1. Restore tracked Bryan repo changes in the *container* before proceeding.
+    #    NOTE: /workspace/mlc-cli is inside a Docker-managed named volume and is
+    #    NOT present on the host filesystem.  The old host-side
+    #    get_git_dirty_state(Path("/workspace/mlc-cli")) call silently did
+    #    nothing because dirty["exists"] was always False.  We now check the
+    #    container directly.
+    dirty = get_container_dirty_state()
     if dirty["exists"] and dirty["tracked_dirty"]:
-        cleanup = restore_tracked_changes(Path("/workspace/mlc-cli"))
+        cleanup = restore_container_tracked_changes()
         if not cleanup["ok"]:
             detail = cleanup["error"] or "failed to restore tracked changes"
             die(
-                "Managed Bryan repo at /workspace/mlc-cli has tracked source modifications and cleanup failed. "
-                "Verification is unsafe until tracked code is clean. "
-                f"Details: {detail}"
+                "Managed Bryan repo at /workspace/mlc-cli (in container) has tracked source "
+                "modifications and cleanup failed.  Verification is unsafe until tracked code "
+                f"is clean.  Details: {detail}"
             )
         print(
-            "  ✓ Managed repo was dirty and was automatically restored to the current checked-out commit"
+            "  ✓ Managed repo (container) was dirty and was automatically restored to the current checked-out commit"
         )
         print("  ✓ Artifacts, downloaded files, and cache were not affected")
 
