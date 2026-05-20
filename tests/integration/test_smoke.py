@@ -133,6 +133,24 @@ def main():
                 print("   -> [SKIP] No converted model directories found in /artifacts.")
                 print("   -> Set DOWNLOAD_RUN_MODEL_IF_MISSING=1 to test auto-download, or skipping /run.")
         
+        # 8. Run URL-based (JIT-style path)
+        print("\n8. Testing URL-based /run stream (upstream JIT path)...")
+        if os.environ.get("SKIP_URL_RUN") == "1":
+            print("   -> [SKIP] SKIP_URL_RUN=1 is set. Skipping URL-based run test.")
+        else:
+            # Covers the URL-based /run path with model_name + model_url and no model_lib.
+            # We intentionally use a lighter model here for smoke-test practicality.
+            url_dl_name = os.environ.get("URL_RUN_MODEL_NAME", "TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC")
+            url_dl_url = os.environ.get("URL_RUN_MODEL_URL", f"https://huggingface.co/mlc-ai/{url_dl_name}")
+            print(f"   -> [URL-RUN] Testing URL-based run with {url_dl_name}...")
+            url_run_payload = {
+                "model_name": url_dl_name,
+                "model_url": url_dl_url,
+                "device": "cuda",
+                "profile": "low"
+            }
+            stream_endpoint(client, "POST", "/run", json_payload=url_run_payload)
+
     print("\n=== Smoke Test Passed ===")
 
 if __name__ == "__main__":
