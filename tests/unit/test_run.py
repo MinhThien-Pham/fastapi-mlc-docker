@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.helpers import build_run_command
+from app.helpers import build_run_command, resolve_model_lib
 from app.main import RunRequest
 
 
@@ -60,7 +60,7 @@ class TestBuildRunCommand:
         cmd = build_run_command(self._req(model_lib="dist/my-lib.so"))
         assert "--model-lib" in cmd
         assert cmd[cmd.index("--model-lib") + 1] == "dist/my-lib.so"
-        
+
     def test_model_url_omitted_when_empty(self):
         cmd = build_run_command(self._req(model_url=""))
         assert "--model-url" not in cmd
@@ -69,6 +69,57 @@ class TestBuildRunCommand:
         cmd = build_run_command(self._req(model_url="https://git.com/model"))
         assert "--model-url" in cmd
         assert cmd[cmd.index("--model-url") + 1] == "https://git.com/model"
+
+    def test_quant_field_does_not_appear_in_command(self):
+        """quant is used for auto-resolution only; it must NOT be forwarded to the CLI."""
+        cmd = build_run_command(self._req(quant="q4f16_1"))
+        assert "--quant" not in cmd
+
+
+# ── resolve_model_lib ─────────────────────────────────────────────────────────
+
+class TestResolveModelLib:
+    """resolve_model_lib() → path | 'multiple' | None"""
+
+    def test_returns_none_when_libs_dir_missing(self, tmp_path):
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "cuda")
+        assert result is None
+
+    def test_returns_none_when_no_match(self, tmp_path):
+        (tmp_path / "dist" / "libs").mkdir(parents=True)
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "cuda")
+        assert result is None
+
+    def test_returns_path_for_so_match(self, tmp_path):
+        libs = tmp_path / "dist" / "libs"
+        libs.mkdir(parents=True)
+        lib = libs / "MyModel-q4f16_1-MLC-q4f16_1-cuda.so"
+        lib.touch()
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "cuda")
+        assert result == str(lib)
+
+    def test_returns_path_for_dylib_match(self, tmp_path):
+        libs = tmp_path / "dist" / "libs"
+        libs.mkdir(parents=True)
+        lib = libs / "MyModel-q4f16_1-MLC-q4f16_1-metal.dylib"
+        lib.touch()
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "metal")
+        assert result == str(lib)
+
+    def test_returns_multiple_sentinel_when_both_extensions_exist(self, tmp_path):
+        libs = tmp_path / "dist" / "libs"
+        libs.mkdir(parents=True)
+        (libs / "MyModel-q4f16_1-MLC-q4f16_1-cuda.so").touch()
+        (libs / "MyModel-q4f16_1-MLC-q4f16_1-cuda.dylib").touch()
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "cuda")
+        assert result == "multiple"
+
+    def test_does_not_match_different_device(self, tmp_path):
+        libs = tmp_path / "dist" / "libs"
+        libs.mkdir(parents=True)
+        (libs / "MyModel-q4f16_1-MLC-q4f16_1-cuda.so").touch()
+        result = resolve_model_lib(tmp_path, "MyModel-q4f16_1-MLC", "q4f16_1", "metal")
+        assert result is None
 
 
 # ── POST /run route ───────────────────────────────────────────────────────────
@@ -118,3 +169,87 @@ class TestRunRouteRepoPresent:
         monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
         resp = client.post("/run", json={})
         assert resp.status_code == 422
+
+    def test_quant_field_accepted(self, client, monkeypatch, tmp_path):
+        """quant is an optional field; providing it must not cause 422."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        fake_stream = self._fake_stream(["data: [DONE]\n\n"])
+        monkeypatch.setattr("app.main.stream_subprocess", fake_stream)
+
+        resp = client.post("/run", json={"model_name": "mod", "quant": "q4f16_1"})
+        assert resp.status_code == 200
+
+    def test_auto_resolved_lib_injected_into_command(self, client, monkeypatch, tmp_path):
+        """When quant is provided and a matching .so exists, it is auto-resolved."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        libs_dir = fake_repo / "dist" / "libs"
+        libs_dir.mkdir(parents=True)
+        expected_lib = libs_dir / "MyModel-q4f16_1-MLC-q4f16_1-cuda.so"
+        expected_lib.touch()
+
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        captured = {}
+
+        async def _capture_stream(cmd, cwd=None):
+            captured["cmd"] = cmd
+            yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr("app.main.stream_subprocess", _capture_stream)
+
+        client.post("/run", json={
+            "model_name": "MyModel-q4f16_1-MLC",
+            "quant": "q4f16_1",
+            "device": "cuda",
+        })
+
+        assert "--model-lib" in captured["cmd"]
+        idx = captured["cmd"].index("--model-lib")
+        assert captured["cmd"][idx + 1] == str(expected_lib)
+
+    def test_no_lib_found_falls_back_to_jit(self, client, monkeypatch, tmp_path):
+        """When quant is provided but no .so exists, JIT fallback (no --model-lib)."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        captured = {}
+
+        async def _capture_stream(cmd, cwd=None):
+            captured["cmd"] = cmd
+            yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr("app.main.stream_subprocess", _capture_stream)
+
+        client.post("/run", json={
+            "model_name": "MyModel-q4f16_1-MLC",
+            "quant": "q4f16_1",
+            "device": "cuda",
+        })
+
+        assert "--model-lib" not in captured.get("cmd", [])
+
+    def test_multiple_libs_returns_error_sse(self, client, monkeypatch, tmp_path):
+        """When multiple .so/.dylib match, the route returns an error SSE."""
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        libs_dir = fake_repo / "dist" / "libs"
+        libs_dir.mkdir(parents=True)
+        (libs_dir / "MyModel-q4f16_1-MLC-q4f16_1-cuda.so").touch()
+        (libs_dir / "MyModel-q4f16_1-MLC-q4f16_1-cuda.dylib").touch()
+
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        resp = client.post("/run", json={
+            "model_name": "MyModel-q4f16_1-MLC",
+            "quant": "q4f16_1",
+            "device": "cuda",
+        })
+
+        assert resp.status_code == 200
+        assert "[ERROR]" in resp.text
+        assert "multiple" in resp.text.lower()

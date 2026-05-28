@@ -202,6 +202,9 @@ class RunRequest(BaseModel):
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
     profile: Literal["really-low", "low", "default", "high"] = "default"
     model_lib: str = ""
+    # Optional: when provided alongside model_name, enables auto-resolution of
+    # the compiled library from dist/libs/<model_name>-<quant>-<device>.so
+    quant: str = ""
 
 
 # ── Chat Engine Endpoints ─────────────────────────────────────────────────────
@@ -820,6 +823,28 @@ async def run_model(req: RunRequest):
         # Replace with the resolved absolute path so the upstream script works
         # regardless of its own cwd changes.
         req = req.model_copy(update={"model_lib": str(resolved_lib)})
+
+    elif req.quant:
+        # ── Auto-resolve model_lib from dist/libs/ when quant is provided ────
+        # Pattern: dist/libs/<model_name>-<quant>-<device>.so
+        from app.helpers import resolve_model_lib
+        resolved_lib = resolve_model_lib(
+            mlc_cli_path=MLC_CLI_PATH,
+            model_name=req.model_name,
+            quant=req.quant,
+            device=req.device,
+        )
+        if resolved_lib == "multiple":
+            async def multi_lib_error_stream():
+                yield (
+                    f"data: [ERROR] Multiple compiled libraries found for "
+                    f"{req.model_name}/{req.quant}/{req.device}.\n\n"
+                    f"data:   Pass model_lib explicitly to disambiguate.\n\n"
+                )
+            return StreamingResponse(multi_lib_error_stream(), media_type="text/event-stream")
+        if resolved_lib:
+            req = req.model_copy(update={"model_lib": resolved_lib})
+        # If resolved_lib is None (not found), proceed without --model-lib (JIT fallback)
 
     cmd = build_run_command(req)
 

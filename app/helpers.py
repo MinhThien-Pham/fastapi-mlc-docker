@@ -456,6 +456,49 @@ def build_run_command(req: Any) -> list[str]:
     return cmd
 
 
+def resolve_model_lib(
+    mlc_cli_path: Path,
+    model_name: str,
+    quant: str,
+    device: str,
+) -> str | None:
+    """Attempt to resolve a pre-compiled model library from dist/libs/.
+
+    Looks for files matching the pattern::
+
+        dist/libs/<model_name>-<quant>-<device>.so
+        dist/libs/<model_name>-<quant>-<device>.dylib   (macOS)
+
+    Returns
+    -------
+    str
+        Absolute path to the library if exactly one match is found.
+    ``"multiple"``
+        Sentinel string when more than one candidate exists; caller should
+        ask the user to pass ``model_lib`` explicitly.
+    ``None``
+        When no matching library is found; caller should fall back to JIT.
+    """
+    libs_dir = mlc_cli_path / "dist" / "libs"
+    if not libs_dir.is_dir():
+        return None
+
+    stem = f"{model_name}-{quant}-{device}"
+    matches: list[Path] = []
+    for ext in (".so", ".dylib"):
+        candidate = libs_dir / f"{stem}{ext}"
+        if candidate.is_file():
+            matches.append(candidate)
+
+    if len(matches) == 0:
+        return None
+    if len(matches) > 1:
+        return "multiple"
+    return str(matches[0])
+
+
+
+
 # ── Artifact discovery ────────────────────────────────────────────────────────
 
 def discover_artifacts(base_path: Path) -> list[dict]:
