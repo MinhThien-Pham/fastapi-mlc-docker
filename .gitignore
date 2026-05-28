@@ -35,3 +35,5 @@ mlc-cli/
 
 # Other
 .ai/
+
+logs/*
