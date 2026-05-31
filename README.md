@@ -257,6 +257,14 @@ The long-running pipeline endpoints stream output with **Server-Sent Events (SSE
 > **Note on `/run`:** This endpoint spawns the upstream `mlc-cli run` REPL, which
 > exits immediately when no stdin is provided. It is useful for verifying that a
 > compiled model loads cleanly on the target hardware. It is **not** the chat API.
+>
+> **Optional `quant` field for compiled-library auto-resolution.** If you omit
+> `model_lib` but provide `quant` (e.g. `"q4f16_1"`), the wrapper looks for a
+> matching compiled library under `dist/libs/<model_name>-<quant>-<device>.so`
+> inside the managed mlc-cli workspace. If exactly one match is found it is passed
+> as `--model-lib` automatically. If no match is found the request proceeds without
+> `--model-lib` (JIT fallback). If multiple matches are found the request fails
+> with an error — pass `model_lib` explicitly to disambiguate.
 
 ### Chat endpoints
 
@@ -468,6 +476,7 @@ GPU-backed and Docker-backed checks still require manual/local execution.
 - **This repository depends on the upstream `mlc-cli` project.** If upstream behavior changes in deeper ways, you may need to investigate, verify, and re-pin before continuing.
 - **The chat path requires `mlc_llm` to be installed.** If the MLC wheels have not been built and installed into the FastAPI Python environment, `POST /chat/load` will return `503`. Run the build pipeline first.
 - **The chat path is single-user only.** One model at a time, no concurrent-request serialization. Suitable for local/dev use.
+- **The wrapper runtime Python and the mlc-cli build Python are separate.** The FastAPI service runs in a Python venv created from the system `python3` in the Docker image (Ubuntu 24.04, currently Python 3.12). The mlc-cli build pipeline creates its own conda environment and uses Python 3.13 for the MLC/TVM build and wheel install. These two Python environments are independent — changing one does not affect the other.
 
 ---
 
