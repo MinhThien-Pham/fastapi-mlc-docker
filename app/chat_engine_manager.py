@@ -70,7 +70,11 @@ def load_engine(model: str, model_lib: str, device: str) -> None:
         try:
             from mlc_llm import MLCEngine
         except ImportError:
-            raise EngineImportError("mlc_llm is not installed or importable in this environment.")
+            import sys
+            raise EngineImportError(
+                f"mlc_llm is not installed or importable in this environment ({sys.executable}). "
+                "Please run POST /build with action='full' or 'install-wheels' to install it."
+            )
 
         # Initialize the engine
         try:

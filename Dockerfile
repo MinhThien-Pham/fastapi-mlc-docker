@@ -8,10 +8,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV CONDA_DIR=/opt/conda
-ENV VIRTUAL_ENV=/opt/venv
+ENV CLI_VENV=mlc-cli-venv
 ENV GOTOOLCHAIN=local
 # conda first so conda-managed python/cmake/rust take precedence
-ENV PATH="${CONDA_DIR}/bin:/usr/local/go/bin:${VIRTUAL_ENV}/bin:${PATH}"
+ENV PATH="${CONDA_DIR}/bin:/usr/local/go/bin:${PATH}"
+
+# Runtime environment variables for MLC/TVM inside FastAPI
+ENV TVM_HOME=/workspace/mlc-cli/tvm
+ENV PYTHONPATH=/workspace/mlc-cli/tvm/python:${PYTHONPATH:-}
+ENV LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib:${LD_LIBRARY_PATH:-}
 
 # Build config — overridable at runtime via docker-compose / docker run -e
 ENV BUILD_ACTION=full
@@ -61,19 +66,20 @@ RUN conda init bash \
     && echo "conda activate base" >> /root/.bashrc
 
 # ── Python venv for FastAPI app ───────────────────────────────────────────────
-RUN python3 -m venv ${VIRTUAL_ENV}
+# Create the conda environment that mlc-cli expects, so FastAPI runs in it too.
+RUN conda create -y -n ${CLI_VENV} python=3.13 pip cmake rust psutil transformers
 
 # ── Workspace (mlc-cli repo lives here via Docker volume) ─────────────────────
 RUN mkdir -p /workspace
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 COPY requirements.txt .
-RUN ${VIRTUAL_ENV}/bin/pip install --no-cache-dir --upgrade pip \
-    && ${VIRTUAL_ENV}/bin/pip install --no-cache-dir -r requirements.txt
+RUN conda run -n ${CLI_VENV} pip install --no-cache-dir --upgrade pip \
+    && conda run -n ${CLI_VENV} pip install --no-cache-dir -r requirements.txt
 
 # ── App source ────────────────────────────────────────────────────────────────
 COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["conda", "run", "--no-capture-output", "-n", "mlc-cli-venv", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
