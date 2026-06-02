@@ -1,12 +1,18 @@
 services:
   web:
-    build: .
+    build:
+      context: .
     ports:
       - '8000:8000'
     volumes:
       - .:/app
       - mlc_workspace:/workspace
     environment:
+      - MLC_CLI_PATH=/workspace/mlc-cli
+      - BAKED_MLC_CLI_PATH=/opt/mlc-cli
+      - TVM_HOME=/workspace/mlc-cli/tvm
+      - PYTHONPATH=/workspace/mlc-cli/tvm/python
+      - LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib
       # Override any of these with: docker compose run -e VAR=value web
       - BUILD_ACTION=${BUILD_ACTION:-full}
       - CUDA_ARCH=${CUDA_ARCH:-86}
