@@ -166,12 +166,12 @@ def main():
             print("\n2. Checking setup (/setup-check)...")
             setup_data = fetch_json(client, "/setup-check")
             
-            print("\n3. Ensuring mlc-cli repo exists (/ensure-repo-exists)...")
-            if not setup_data.get("repo_exists"):
-                client.post("/ensure-repo-exists").raise_for_status()
-                
-            print("\n4. Checking repo status (/repo-status)...")
+            print("\n3. Checking baked mlc-cli repo status (/repo-status)...")
             client.get("/repo-status").raise_for_status()
+            
+            print("\n4. Confirming setup is healthy...")
+            if not setup_data.get("repo_exists"):
+                print("   -> Warning: setup_data indicates repo does not exist.")
 
             # Step 5: Build
             print(f"\n5. Testing /build stream (action: {full_build_action})...")

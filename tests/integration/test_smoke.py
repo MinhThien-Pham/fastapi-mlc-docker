@@ -46,13 +46,10 @@ def main():
         setup_data = resp.json()
         print(f"   -> Repo exists: {setup_data.get('repo_exists')}")
         
-        # 3. Ensure repo exists
-        print("\n3. Ensuring mlc-cli repo exists (/ensure-repo-exists)...")
-        if not setup_data.get("repo_exists"):
-            client.post("/ensure-repo-exists").raise_for_status()
-            print("   -> Repo cloned successfully.")
-        else:
-            print("   -> Repo already exists, skipping clone.")
+        # 3. Check baked repo status
+        print("\n3. Checking baked mlc-cli repo status (/repo-status)...")
+        client.get("/repo-status").raise_for_status()
+        print("   -> Checked repo status successfully.")
 
         # 4. Repo status
         print("\n4. Checking repo status (/repo-status)...")

@@ -116,10 +116,10 @@ class TestQuantizeRouteRepoMissing:
         assert "[ERROR]" in body
         assert "mlc-cli" in body.lower()
 
-    def test_error_hints_at_ensure_repo_exists(self, client, monkeypatch, tmp_path):
+    def test_error_hints_at_repo_status(self, client, monkeypatch, tmp_path):
         monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
         resp = client.post("/quantize", json={"model": "models/Llama-3-8B"})
-        assert "ensure-repo-exists" in resp.text
+        assert "repo-status" in resp.text
 
 
 class TestQuantizeRouteRepoPresent:
