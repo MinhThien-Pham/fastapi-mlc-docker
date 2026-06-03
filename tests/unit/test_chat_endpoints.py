@@ -32,7 +32,11 @@ def mock_mlc_llm():
 @pytest.fixture(autouse=True)
 def mock_paths():
     """Assume paths are valid by default unless overridden."""
-    with patch("os.path.isdir", return_value=True), patch("os.path.isfile", return_value=True):
+    with patch("os.path.isdir", return_value=True), \
+         patch("os.path.isfile", return_value=True), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("pathlib.Path.is_dir", return_value=True), \
+         patch("pathlib.Path.is_file", return_value=True):
         yield
 
 
@@ -58,16 +62,52 @@ def test_load_success(client, mock_mlc_llm):
     assert status_resp.json()["loaded"] is True
     assert status_resp.json()["model"] == "/valid/model/dir"
 
+def test_load_relative_paths_resolved(client, mock_mlc_llm):
+    response = client.post("/chat/load", json={
+        "model": "relative/model",
+        "model_lib": "relative/lib.so",
+        "device": "cuda:0"
+    })
+    assert response.status_code == 200
+    
+    # Engine should be called with resolved absolute paths
+    from app.main import MLC_CLI_PATH
+    expected_model = str(MLC_CLI_PATH / "relative/model")
+    expected_lib = str(MLC_CLI_PATH / "relative/lib.so")
+    
+    mock_mlc_llm.assert_called_once()
+    args, kwargs = mock_mlc_llm.call_args
+    assert kwargs.get("model") == expected_model
+    assert kwargs.get("model_lib") == expected_lib
 
 def test_load_invalid_paths(client):
-    with patch("os.path.isdir", return_value=False):
+    with patch("pathlib.Path.exists", return_value=False):
         response = client.post("/chat/load", json={
             "model": "/bad/model/dir",
             "model_lib": "/valid/lib.so"
         })
     
     assert response.status_code == 400
-    assert "does not exist" in response.json()["detail"]
+    assert "Model directory not found" in response.json()["detail"]
+
+def test_load_relative_model_missing(client):
+    with patch("pathlib.Path.is_dir", return_value=False):
+        response = client.post("/chat/load", json={
+            "model": "missing/model",
+            "model_lib": "/valid/lib.so"
+        })
+    assert response.status_code == 400
+    assert "Model directory not found" in response.json()["detail"]
+
+def test_load_relative_model_lib_missing(client):
+    # Model exists but lib does not
+    with patch("pathlib.Path.is_file", return_value=False):
+        response = client.post("/chat/load", json={
+            "model": "/valid/model",
+            "model_lib": "missing/lib.so"
+        })
+    assert response.status_code == 400
+    assert "Model library file not found" in response.json()["detail"]
 
 
 def test_load_conflict(client, mock_mlc_llm):

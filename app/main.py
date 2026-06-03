@@ -221,13 +221,25 @@ def chat_load(req: ChatLoadRequest):
     Load the MLCEngine with the specified model and library.
     This is an explicit initialization step before any completions can be requested.
     """
+    model_path = Path(req.model)
+    if not model_path.is_absolute():
+        model_path = MLC_CLI_PATH / req.model
+    if not model_path.exists() or not model_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Model directory not found: {model_path}")
+
+    model_lib_path = Path(req.model_lib)
+    if not model_lib_path.is_absolute():
+        model_lib_path = MLC_CLI_PATH / req.model_lib
+    if not model_lib_path.exists() or not model_lib_path.is_file():
+        raise HTTPException(status_code=400, detail=f"Model library file not found: {model_lib_path}")
+
     try:
         chat_engine_manager.load_engine(
-            model=req.model,
-            model_lib=req.model_lib,
+            model=str(model_path),
+            model_lib=str(model_lib_path),
             device=req.device
         )
-        return {"status": "success", "message": f"Engine loaded for model {req.model}"}
+        return {"status": "success", "message": f"Engine loaded for model {model_path}"}
     except chat_engine_manager.InvalidArtifactPathError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except chat_engine_manager.EngineConflictError as e:

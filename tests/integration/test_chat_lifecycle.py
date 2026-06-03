@@ -40,7 +40,10 @@ def clean_engine_state():
 def mock_paths():
     """Treat all paths as valid so load_engine never rejects dummy paths."""
     with patch("os.path.isdir", return_value=True), \
-         patch("os.path.isfile", return_value=True):
+         patch("os.path.isfile", return_value=True), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("pathlib.Path.is_dir", return_value=True), \
+         patch("pathlib.Path.is_file", return_value=True):
         yield
 
 
