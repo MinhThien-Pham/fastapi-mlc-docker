@@ -1,4 +1,4 @@
-name: Upstream Contract Check
+name: mlc-cli Update Check
 
 on:
   schedule:
@@ -20,38 +20,43 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Read pinned SHA
+      - name: Read pinned mlc-cli ref
         id: pinned
         run: |
-          SHA=$(python3 -c "import json; print(json.load(open('.upstream-sha.json'))['pinned_sha'])")
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Pinned SHA: $SHA"
+          MLC_CLI_REPO=$(grep '^MLC_CLI_REPO=' docker/mlc-cli.lock | cut -d= -f2-)
+          MLC_CLI_REF=$(grep '^MLC_CLI_REF=' docker/mlc-cli.lock | cut -d= -f2-)
 
-      - name: Fetch upstream HEAD
+          echo "repo=$MLC_CLI_REPO" >> "$GITHUB_OUTPUT"
+          echo "sha=$MLC_CLI_REF" >> "$GITHUB_OUTPUT"
+
+          echo "Configured mlc-cli repo: $MLC_CLI_REPO"
+          echo "Pinned mlc-cli ref: $MLC_CLI_REF"
+
+      - name: Fetch configured mlc-cli repo HEAD
         id: upstream
         run: |
-          SHA=$(git ls-remote https://github.com/ballinyouup/mlc-cli.git HEAD | cut -f1)
+          SHA=$(git ls-remote "${{ steps.pinned.outputs.repo }}" HEAD | cut -f1)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Upstream HEAD: $SHA"
+          echo "Configured mlc-cli repo HEAD: $SHA"
 
       - name: Compare SHAs
         id: compare
         run: |
           if [ "${{ steps.pinned.outputs.sha }}" = "${{ steps.upstream.outputs.sha }}" ]; then
-            echo "✅ No drift. Upstream SHA matches verified SHA."
+            echo "✅ No update detected. Configured mlc-cli repo HEAD matches the pinned ref."
             echo "drifted=false" >> "$GITHUB_OUTPUT"
-            echo "## ✅ No upstream drift" >> "$GITHUB_STEP_SUMMARY"
-            echo "Upstream HEAD matches verified SHA: \`${{ steps.pinned.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "## ✅ No mlc-cli update detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "Configured mlc-cli repo HEAD matches pinned ref: \`${{ steps.pinned.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "⚠️ Drift detected."
-            echo "  Verified: ${{ steps.pinned.outputs.sha }}"
-            echo "  Upstream: ${{ steps.upstream.outputs.sha }}"
+            echo "⚠️ New mlc-cli commit detected."
+            echo "  Pinned ref: ${{ steps.pinned.outputs.sha }}"
+            echo "  Repo HEAD:  ${{ steps.upstream.outputs.sha }}"
             echo "drifted=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clone upstream
+      - name: Clone configured mlc-cli repo
         if: steps.compare.outputs.drifted == 'true'
-        run: git clone --depth 1 https://github.com/ballinyouup/mlc-cli.git /tmp/mlc-cli-upstream
+        run: git clone --depth 1 "${{ steps.pinned.outputs.repo }}" /tmp/mlc-cli-upstream
 
       - name: Run contract check
         if: steps.compare.outputs.drifted == 'true'
@@ -61,10 +66,12 @@ jobs:
           python tests/upstream/check_cli_contract.py /tmp/mlc-cli-upstream
           EXIT_CODE=$?
           set -e
+
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
-          if [ $EXIT_CODE -eq 0 ]; then
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
             echo "status=pass" >> "$GITHUB_OUTPUT"
-          elif [ $EXIT_CODE -eq 1 ]; then
+          elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "status=fail" >> "$GITHUB_OUTPUT"
           else
             echo "status=inconclusive" >> "$GITHUB_OUTPUT"
@@ -74,31 +81,36 @@ jobs:
         if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'pass'
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
-          ## ✅ Upstream drift detected — contract check PASSED
+          ## ✅ New mlc-cli commit detected — contract check PASSED
 
           | | SHA |
           |--|-----|
-          | **Verified** | `${{ steps.pinned.outputs.sha }}` |
-          | **Upstream HEAD** | `${{ steps.upstream.outputs.sha }}` |
+          | **Pinned ref** | `${{ steps.pinned.outputs.sha }}` |
+          | **Repo HEAD** | `${{ steps.upstream.outputs.sha }}` |
 
-          The CLI interface contract is intact. No automated issue created.
+          The CLI interface contract is intact. No automated issue was created.
 
-          **Next step:** When convenient, manually run smoke/full integration tests
-          against the new upstream version, then update `.upstream-sha.json`.
+          **Next step:** Run the local candidate verification flow before updating `docker/mlc-cli.lock`:
+
+          ```bash
+          python scripts/verify_mlc_cli_candidate.py
+          ```
+
+          Only promote the tested ref after the candidate Docker build, smoke integration test, and full integration test pass.
           EOF
 
       - name: Write summary (contract failed)
         if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
-          ## ❌ Upstream drift detected — contract check FAILED
+          ## ❌ New mlc-cli commit detected — contract check FAILED
 
           | | SHA |
           |--|-----|
-          | **Verified** | `${{ steps.pinned.outputs.sha }}` |
-          | **Upstream HEAD** | `${{ steps.upstream.outputs.sha }}` |
+          | **Pinned ref** | `${{ steps.pinned.outputs.sha }}` |
+          | **Repo HEAD** | `${{ steps.upstream.outputs.sha }}` |
 
-          The upstream CLI interface has changed in ways that will break our API wrapper.
+          The configured mlc-cli repo has changed in ways that may break this API wrapper.
           A GitHub issue has been created.
           EOF
 
@@ -106,10 +118,11 @@ jobs:
         if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'inconclusive'
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
-          ## ⚠️ Upstream drift detected — contract check INCONCLUSIVE
+          ## ⚠️ New mlc-cli commit detected — contract check INCONCLUSIVE
 
-          Could not complete the contract check (source structure changed, parse error, etc.).
-          Check the workflow logs for details. No issue created automatically.
+          Could not complete the contract check because the source structure changed, parsing failed, or another unexpected condition occurred.
+
+          Check the workflow logs. No issue was created automatically.
           EOF
 
       - name: Ensure drift label exists
@@ -119,7 +132,7 @@ jobs:
         run: |
           gh label create "upstream-contract-fail" \
             --color "E11D48" \
-            --description "Upstream mlc-cli CLI contract check failed" \
+            --description "Configured mlc-cli CLI contract check failed" \
             2>/dev/null || true
 
       - name: Check for existing drift issue
@@ -138,30 +151,42 @@ jobs:
           steps.existing.outputs.open_issues == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD: ${{ steps.pinned.outputs.sha }}
+          NEW: ${{ steps.upstream.outputs.sha }}
+          MLC_CLI_REPO: ${{ steps.pinned.outputs.repo }}
         run: |
-          OLD="${{ steps.pinned.outputs.sha }}"
-          NEW="${{ steps.upstream.outputs.sha }}"
+          WEB_REPO="${MLC_CLI_REPO%.git}"
+          WEB_REPO="${WEB_REPO/git@github.com:/https://github.com/}"
+
           gh issue create \
-            --title "❌ Upstream mlc-cli contract check failed" \
+            --title "❌ mlc-cli contract check failed" \
             --label "upstream-contract-fail" \
             --body "$(cat <<BODY
-          The weekly upstream contract check detected interface changes in \`mlc-cli\` that will break our API wrapper.
+          The weekly mlc-cli update check detected interface changes that may break this API wrapper.
 
           | | SHA |
           |--|-----|
-          | **Last verified** | \`${OLD}\` |
-          | **Upstream HEAD** | \`${NEW}\` |
-          | **Diff** | [compare](https://github.com/ballinyouup/mlc-cli/compare/${OLD}...${NEW}) |
+          | **Pinned ref** | \`${OLD}\` |
+          | **Repo HEAD** | \`${NEW}\` |
+          | **Diff** | [compare](${WEB_REPO}/compare/${OLD}...${NEW}) |
 
           ### What to do
-          1. Review the [upstream diff](https://github.com/ballinyouup/mlc-cli/compare/${OLD}...${NEW})
-          2. Update \`app/helpers.py\` to match any changed CLI flags
-          3. Update \`tests/upstream/check_cli_contract.py\` contract if needed
-          4. Run smoke + full integration tests
-          5. Update \`.upstream-sha.json\` and close this issue
+
+          1. Review the [mlc-cli diff](${WEB_REPO}/compare/${OLD}...${NEW})
+          2. Update FastAPI wrapper code if any CLI flags, commands, scripts, or output fields changed
+          3. Update \`tests/upstream/check_cli_contract.py\` if the expected CLI surface changed intentionally
+          4. Run local candidate verification:
+
+             \`\`\`bash
+             python scripts/verify_mlc_cli_candidate.py
+             \`\`\`
+
+          5. Only update \`docker/mlc-cli.lock\` after candidate Docker build, smoke integration, and full integration pass
+          6. Close this issue after the tested ref is safely promoted
           BODY
           )"
 
       - name: Fail workflow on contract failure
         if: steps.compare.outputs.drifted == 'true' && steps.contract.outputs.status == 'fail'
         run: exit 1
+        
