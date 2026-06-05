@@ -21,6 +21,7 @@ from app.helpers import (
     detect_known_failure,
     discover_artifacts,
     run_tool_check,
+    resolve_chat_artifacts,
 )
 
 @asynccontextmanager
@@ -176,9 +177,11 @@ class CompileRequest(BaseModel):
 
 class ChatLoadRequest(BaseModel):
     """Request body for POST /chat/load to initialize the direct MLCEngine."""
-    model: str
-    model_lib: str
+    model: str = ""
+    model_name: str = ""
+    model_lib: str = ""
     device: str = "cuda:0"
+    quant: str = "q4f16_1"
 
 
 class ChatMessage(BaseModel):
@@ -221,25 +224,51 @@ def chat_load(req: ChatLoadRequest):
     Load the MLCEngine with the specified model and library.
     This is an explicit initialization step before any completions can be requested.
     """
-    model_path = Path(req.model)
-    if not model_path.is_absolute():
-        model_path = MLC_CLI_PATH / req.model
-    if not model_path.exists() or not model_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Model directory not found: {model_path}")
+    if req.model_lib:
+        target_model = req.model_name if req.model_name else req.model
+        if not target_model:
+            raise HTTPException(status_code=400, detail="When model_lib is provided, model or model_name is required.")
 
-    model_lib_path = Path(req.model_lib)
-    if not model_lib_path.is_absolute():
-        model_lib_path = MLC_CLI_PATH / req.model_lib
-    if not model_lib_path.exists() or not model_lib_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Model library file not found: {model_lib_path}")
+        model_path = Path(target_model)
+        if not model_path.is_absolute():
+            if not ("/" in target_model or "\\" in target_model) and target_model.endswith("-MLC"):
+                model_path = MLC_CLI_PATH / "dist" / target_model
+            else:
+                model_path = MLC_CLI_PATH / target_model
+        if not model_path.exists() or not model_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Model directory not found: {model_path}")
+
+        model_lib_path = Path(req.model_lib)
+        if not model_lib_path.is_absolute():
+            model_lib_path = MLC_CLI_PATH / req.model_lib
+        if not model_lib_path.exists() or not model_lib_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Model library file not found: {model_lib_path}")
+        
+        final_model = str(model_path)
+        final_model_lib = str(model_lib_path)
+    else:
+        try:
+            final_model, final_model_lib = resolve_chat_artifacts(
+                mlc_cli_path=MLC_CLI_PATH,
+                model=req.model,
+                model_name=req.model_name,
+                quant=req.quant,
+                device=req.device,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    engine_device = req.device
+    if engine_device == "cuda":
+        engine_device = "cuda:0"
 
     try:
         chat_engine_manager.load_engine(
-            model=str(model_path),
-            model_lib=str(model_lib_path),
-            device=req.device
+            model=final_model,
+            model_lib=final_model_lib,
+            device=engine_device
         )
-        return {"status": "success", "message": f"Engine loaded for model {model_path}"}
+        return {"status": "success", "message": f"Engine loaded for model {final_model}"}
     except chat_engine_manager.InvalidArtifactPathError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except chat_engine_manager.EngineConflictError as e:

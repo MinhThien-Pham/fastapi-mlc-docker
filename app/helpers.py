@@ -315,3 +315,89 @@ def discover_artifacts(base_path: Path) -> list[dict]:
                 pass
 
     return artifacts
+
+
+def resolve_chat_artifacts(
+    mlc_cli_path: Path,
+    model: str,
+    model_name: str,
+    quant: str,
+    device: str,
+) -> tuple[str, str]:
+    """Resolve model shorthand to explicit model and model_lib paths.
+    
+    Returns:
+        (resolved_model_path, resolved_model_lib_path)
+    
+    Raises:
+        ValueError with clear error message if resolution fails.
+    """
+    target = model_name if model_name else model
+    if not target:
+        raise ValueError("Must provide 'model' or 'model_name'.")
+
+    dist_dir = mlc_cli_path / "dist"
+    base_device = device.split(":")[0] if ":" in device else device
+
+    candidate_dirs: list[Path] = []
+    
+    # 1. Check if target is a direct path to an existing artifact directory
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        target_path = mlc_cli_path / target
+        
+    if target_path.is_dir() and target_path.name.endswith("-MLC"):
+        candidate_dirs.append(target_path)
+    else:
+        # 2. Fallback to shorthand / HF ID search
+        search_term = target
+        if "/" in search_term and not search_term.startswith("dist/"):
+            search_term = search_term.split("/")[-1]
+
+        if search_term.endswith("-MLC"):
+            exact_dir = dist_dir / search_term
+            if exact_dir.is_dir():
+                candidate_dirs.append(exact_dir)
+                
+        if not candidate_dirs and dist_dir.is_dir():
+            for d in dist_dir.iterdir():
+                if d.is_dir() and d.name.startswith(search_term) and d.name.endswith("-MLC"):
+                    candidate_dirs.append(d)
+                    
+    candidate_dirs.sort()
+                
+    if not candidate_dirs:
+        raise ValueError(f"No compiled MLC artifact found for '{target}'. Run /quantize and /compile first, then try /chat/load again.")
+
+    if len(candidate_dirs) > 1:
+        quant_matches = [d for d in candidate_dirs if f"-{quant}-" in d.name or d.name.endswith(f"-{quant}-MLC")]
+        if quant_matches:
+            candidate_dirs = quant_matches
+            
+    if len(candidate_dirs) > 1:
+        candidates_str = ", ".join(d.name for d in candidate_dirs)
+        raise ValueError(f"Multiple artifact candidates found for '{target}': {candidates_str}. Please specify 'model_name' or 'quant' to disambiguate.")
+
+    resolved_model_dir = candidate_dirs[0]
+    
+    libs_dir = mlc_cli_path / "dist" / "libs"
+    lib_matches: list[Path] = []
+    if libs_dir.is_dir():
+        for ext in (".so", ".dylib"):
+            for candidate in libs_dir.glob(f"{resolved_model_dir.name}-*-{base_device}{ext}"):
+                lib_matches.append(candidate)
+    
+    lib_matches.sort()
+                
+    if not lib_matches:
+        raise ValueError(f"Found model artifact directory, but no compiled library was found. Run /compile first. (Expected lib under dist/libs/{resolved_model_dir.name}-*-{base_device}.so or .dylib)")
+        
+    if len(lib_matches) > 1:
+        quant_matches = [p for p in lib_matches if f"-{quant}-" in p.name]
+        if quant_matches:
+            lib_matches = quant_matches
+            
+    if len(lib_matches) > 1:
+        raise ValueError(f"Multiple compiled libraries found for '{resolved_model_dir.name}' and device '{base_device}'. Please specify 'quant' to disambiguate.")
+
+    return str(resolved_model_dir), str(lib_matches[0])
