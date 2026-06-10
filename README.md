@@ -23,21 +23,23 @@
 
 ---
 
-## What this project does
+## ✨ What this project does
 
-This repository wraps the upstream Go project [`mlc-cli`](https://github.com/ballinyouup/mlc-cli/) in a FastAPI service.
+This repository wraps the upstream Go project [`mlc-cli`](https://github.com/ballinyouup/mlc-cli/)
+in a FastAPI service.
 
-`mlc-cli` handles the MLC-LLM build pipeline — compiling TVM, converting model weights, and producing compiled model libraries. This service adds:
+`mlc-cli` handles the MLC-LLM build pipeline — compiling TVM, converting model weights,
+and producing compiled model libraries. This service adds:
 
 - **REST endpoints** for build, quantize, compile, run/load-test, artifact discovery, and chat
-- **Server-Sent Events (SSE)** so long-running steps stream progress live
+- **Server-Sent Events (SSE)** so long-running steps stream progress live to your terminal
 - **A pinned mlc-cli source** packaged into the Docker image at a verified commit, so builds are reproducible
 - **A writable runtime workspace** that preserves generated artifacts across container restarts
 - **Direct local chat** via the MLC-LLM Python engine, once a model has been built and compiled
 
 ---
 
-## Why it exists
+## 🧠 Why it exists
 
 Using the upstream tool directly has a few practical problems:
 
@@ -50,7 +52,7 @@ Using the upstream tool directly has a few practical problems:
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 docker/mlc-cli.lock        ← pinned mlc-cli repo and commit SHA
@@ -66,39 +68,48 @@ docker/entrypoint.sh       ← syncs /opt/mlc-cli into /workspace/mlc-cli on sta
 FastAPI service            ← build / quantize / compile / run / chat
 ```
 
-**Runtime paths:**
+**Key paths inside the container:**
 
 | Path | Purpose |
 |---|---|
 | `/opt/mlc-cli` | Pinned mlc-cli source included in the Docker image |
 | `/workspace/mlc-cli` | Writable runtime workspace used by the API |
+| `/workspace/mlc-cli/models/` | Raw downloaded model weights |
 | `/workspace/mlc-cli/dist/` | Quantized models and compiled libraries |
 | `/workspace/mlc-cli/wheels/` | Built Python wheels |
-| `/workspace/mlc-cli/models/` | Raw downloaded model weights |
 
-Updating the mlc-cli version means editing `docker/mlc-cli.lock` and rebuilding the image. The container does not fetch or pull mlc-cli at runtime.
+Updating the mlc-cli version means editing `docker/mlc-cli.lock` and rebuilding the image.
+The container does not fetch or pull mlc-cli at runtime.
 
 ---
 
-## Quick start
+## ⚡ Quick setup
+
+> This section covers the **one-time initial setup**.
+> Day-to-day usage is in the [Regular usage](#-regular-usage) section below.
 
 **Prerequisites:** Docker + Docker Compose v2.x, NVIDIA GPU + drivers, NVIDIA Container Toolkit.
+
+**1. Build and start the service:**
 
 ```bash
 docker compose up --build
 ```
 
-The API will be available at `http://localhost:8000`.
+The API is available at `http://localhost:8000`.
 
-**Verify it is working:**
+**2. Verify the environment:**
 
 ```bash
 curl http://localhost:8000/health
-curl -s http://localhost:8000/repo-status | python3 -m json.tool
-curl -s http://localhost:8000/setup-check | python3 -m json.tool
+curl -s http://localhost:8000/repo-status   | python3 -m json.tool
+curl -s http://localhost:8000/setup-check   | python3 -m json.tool
 ```
 
-Check the `setup-check` response. If `mlc_llm_importable` or `tvm_importable` is `false`, install the built wheels:
+**3. Install Python wheels (if needed):**
+
+Check the `setup-check` response. If `mlc_llm_importable` or `tvm_importable` is `false`,
+install the built wheels into the runtime environment:
 
 ```bash
 curl -N -X POST http://localhost:8000/build \
@@ -106,42 +117,98 @@ curl -N -X POST http://localhost:8000/build \
   -d '{"action": "install-wheels"}'
 ```
 
+You only need to do this once, or after a rebuild.
+
 ---
 
-## Quick API demo
+## 🎥 Demo / Showcase
 
-**Stream the full build:**
+A short demo can show:
+
+- Starting the Docker service
+- Checking runtime status
+- Installing wheels if needed
+- Preparing a model (quantize + compile)
+- Loading a compiled model
+- Sending a chat request
+
+Demo video: **coming soon**
+
+---
+
+## 📦 Get your first model
+
+> This step is done once per model — not every time you start the service.
+
+The easiest way to get started is by passing a Hugging Face model ID directly to the API.
+
+**1. Find a model ID:**
+
+Go to [Hugging Face Models (Text Generation)](https://huggingface.co/models?pipeline_tag=text-generation&sort=downloads) and find a model you want to try.
+
+Copy the model ID from the page title or URL path.
+- **URL:** `https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0`
+- **Model ID:** `TinyLlama/TinyLlama-1.1B-Chat-v1.0`
+
+**2. Quantize and compile it:**
+
+Pass the model ID directly to `/quantize` (see Regular usage below). The API will handle downloading the weights automatically.
+
+> **Note on private models:** For gated or private models on Hugging Face, ensure your container has the necessary Hugging Face access configured before running `/quantize`.
+
+*(For advanced local folder setups, see [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md)).*
+
+---
+
+## 🔁 Regular usage
+
+> After setup and model preparation, your day-to-day workflow looks like this.
+
+**Start the service:**
 
 ```bash
-curl -N -X POST http://localhost:8000/build \
-  -H 'Content-Type: application/json' \
-  -d '{"action": "full", "cuda": "y", "cuda_arch": "86"}'
+docker compose up
 ```
 
-**Quantize a model:**
+**Check status:**
 
 ```bash
+curl http://localhost:8000/health
+curl -s http://localhost:8000/setup-check | python3 -m json.tool
+```
+
+**See what artifacts are available:**
+
+```bash
+curl -s http://localhost:8000/artifacts | python3 -m json.tool
+```
+
+**If you have model weights and need to prepare them (once per model):**
+
+```bash
+# Quantize from Hugging Face → dist/<ModelName>-<quant>-MLC/
+# conv_template defaults to "auto" — the API infers it from the model name.
 curl -N -X POST http://localhost:8000/quantize \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "models/TinyLlama-1.1B-Chat-v1.0",
-    "quant": "q4f16_1",
-    "conv_template": "llama-2"
-  }'
+  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
+
+# Compile the model library → dist/libs/<ModelName>-<quant>-cuda.so
+curl -N -X POST http://localhost:8000/compile \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "dist/<ModelName>-q4f16_1-MLC", "quant": "q4f16_1"}'
 ```
 
-**Chat with a compiled model:**
+**Load a compiled model, chat, then unload:**
 
 ```bash
-# Load model (use your actual artifact paths from /artifacts)
+# Load
 curl -X POST http://localhost:8000/chat/load \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "dist/TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC",
-    "model_lib": "dist/libs/TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC-q4f16_1-cuda.so"
+    "model": "TinyLlama-1.1B-Chat-v1.0"
   }'
 
-# Send a message
+# Chat
 curl -X POST http://localhost:8000/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
@@ -150,30 +217,44 @@ curl -X POST http://localhost:8000/chat/completions \
 curl -X POST http://localhost:8000/chat/unload
 ```
 
-For full request schemas, examples, and error codes, see [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md).
+See [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md) for all request fields, full schemas, and error codes.
 
 ---
 
-## Common workflows
+## ⚡ Quick API demo
 
-| Goal | Steps |
-|---|---|
-| Install Python wheels into the runtime | `POST /build` with `action=install-wheels` |
-| Convert model weights | `POST /quantize` |
-| Compile model library | `POST /compile` |
-| Verify a compiled model loads on GPU | `POST /run` |
-| Chat with a compiled model | Load → completions → unload |
-| Check what artifacts are built | `GET /artifacts` |
-| Check environment readiness | `GET /setup-check` |
-| Check the pinned source status | `GET /repo-status` |
-| Test a newer mlc-cli version safely | `python scripts/verify_mlc_cli_candidate.py` |
-
----
-
-## Testing
+**With TinyLlama (replace paths with your actual artifact names from `/artifacts`):**
 
 ```bash
-# Fast local tests (no Docker required)
+# Load
+curl -X POST http://localhost:8000/chat/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "TinyLlama-1.1B-Chat-v1.0"
+  }'
+
+# Chat
+curl -X POST http://localhost:8000/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "What is 2 + 2?"}]}'
+
+# Stream chat
+curl -N -X POST http://localhost:8000/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Tell me a short joke."}], "stream": true}'
+
+# Unload
+curl -X POST http://localhost:8000/chat/unload
+```
+
+For full build/quantize/compile/run examples, see [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md).
+
+---
+
+## 🧪 Testing
+
+```bash
+# Fast local tests — no Docker or GPU required
 pytest tests/unit/ tests/integration/ -q
 
 # Smoke test against a running container
@@ -183,22 +264,35 @@ API_URL=http://localhost:8000 python tests/integration/test_smoke.py
 API_URL=http://localhost:8000 python tests/integration/test_full_pipeline.py
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full test strategy, CI workflows, and candidate verification flow.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full test strategy, CI workflows,
+and the candidate mlc-cli verification flow.
 
 ---
 
-## Limitations
+## ⚠️ Limitations
 
-- **GPU-backed flows require the full CUDA + container setup.** Some checks run without a GPU; build and inference require it.
-- **Updating mlc-cli requires an image rebuild.** Edit `docker/mlc-cli.lock`, rebuild, and validate the new runtime.
-- **A fresh container may need wheel installation.** If `mlc_llm` or `tvm` is not importable, run `/build` with `action=install-wheels`.
-- **One model at a time.** The chat path loads one model into GPU memory. Call `/chat/unload` before loading a different model.
-- **No conversation history.** Clients send the full message array with each request.
-- **Model output quality depends on the model and prompt format.** A successful API response proves the runtime works, not that the model behaves well.
+- **GPU-backed flows require the full CUDA + container setup.**
+  Some checks run without a GPU; build and inference require it.
+
+- **Updating mlc-cli requires an image rebuild.**
+  Edit `docker/mlc-cli.lock`, rebuild, and validate the new runtime.
+
+- **A fresh container may need wheel installation.**
+  If `mlc_llm` or `tvm` is not importable, run `/build` with `action=install-wheels`.
+
+- **One model at a time.**
+  The chat path loads one model into GPU memory.
+  Call `/chat/unload` before loading a different model.
+
+- **No server-side conversation history.**
+  Clients send the full message array with each request.
+
+- **Model output quality depends on the model and prompt format.**
+  A successful API response proves the runtime works, not that the model behaves well.
 
 ---
 
-## More documentation
+## 📚 More documentation
 
 | Document | Contents |
 |---|---|

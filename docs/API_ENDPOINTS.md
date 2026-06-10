@@ -239,6 +239,30 @@ data: [DONE]
 
 ---
 
+### `GET /conv-templates`
+
+Returns the full list of supported `conv_template` values for `POST /quantize`.
+
+The list is loaded from the pinned mlc-llm source inside the Docker image and
+falls back to a hardcoded list if the source is unavailable.
+It reflects the actual pinned runtime, not just what public MLC docs list.
+
+```bash
+curl -s http://localhost:8000/conv-templates | python3 -m json.tool
+```
+
+**Example response:**
+
+```json
+{
+  "templates": ["LM", "aya-23", "chatml", "deepseek", "deepseek_v3", "llama-3", "tinyllama_v1_0", "..."],
+  "default": "auto",
+  "note": "Use \"auto\" (the default) to let the API infer the template from the model name. Pass an explicit name only to override inference."
+}
+```
+
+---
+
 ### `POST /quantize`
 
 Converts raw Hugging Face model weights to MLC format and streams output as SSE.
@@ -253,28 +277,74 @@ Internally runs two steps:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `model` | string | **required** | Path to raw model weights. Can be a path inside the workspace (e.g. `models/Llama-3-8B`) or an absolute path |
+| `model` | string | **required** | Hugging Face model ID (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`) or local path (e.g. `models/Llama-3-8B`) |
 | `quant` | string | `"q4f16_1"` | Quantization format |
 | `device` | string | `"cuda"` | Target device |
-| `conv_template` | string | `"llama-3"` | Conversation template matching the model architecture |
+| `conv_template` | string | `"auto"` | Conversation template — tells MLC how to format chat prompts for the model. See below. |
 | `output` | string | `""` | Output path. If omitted, defaults to `dist/<model_basename>-<quant>-MLC` |
+
+**`conv_template` behavior:**
+
+| Value | Behavior |
+|---|---|
+| `"auto"` (default) | API infers the template from the model name. Emits `[INFO]` to the stream with the chosen template. If no template can be inferred, returns HTTP 400 before streaming. |
+| Explicit name (e.g. `"chatml"`) | Used as-is. If it looks like a mismatch for the model, the API emits a `[WARNING]` to the stream, then continues. |
+| Unknown name (not in supported list) | API emits a `[WARNING]` then continues — mlc-cli may warn further or produce a broken chat config. |
+
+Template names come from the pinned mlc-llm source bundled in the Docker image, not only public docs.
+The full list is available at runtime via `GET /conv-templates`.
+
+> **Note:** For models requiring custom templates (e.g. gpt-oss, Harmony), `auto` mode will return HTTP 400.
+> Pass `conv_template` explicitly if you intentionally want to experiment with these.
 
 **Supported quantization formats:** `q4f16_1`, `q4f16_ft`, `q4f32_1`, `q3f16_1`, `q8f16_1`, `q0f16`, `q0f32`
 
-**Supported conversation templates:** `llama-3.1`, `llama-3`, `llama-2`, `chatml`, `mistral_default`, `ministral`, `phi-3`, `phi-2`, `gemma`, `qwen2`
+**Common model / template mappings (auto-inferred):**
 
-**Example:**
+| Model family | Inferred `conv_template` |
+|---|---|
+| TinyLlama | `tinyllama_v1_0` |
+| Llama 3.1, Llama 3.2 | `llama-3_1` |
+| Llama 3 | `llama-3` |
+| Llama 2 | `llama-2` |
+| DeepSeek-V3 | `deepseek_v3` |
+| DeepSeek-V2 | `deepseek_v2` |
+| DeepSeek-R1 (Qwen distill) | `deepseek_r1_qwen` |
+| DeepSeek-R1 (Llama distill) | `deepseek_r1_llama` |
+| Mistral / Mixtral | `mistral_default` |
+| Ministral 3B | `ministral3` |
+| Phi-4 | `phi-4` |
+| Phi-3 | `phi-3` |
+| Phi-2 | `phi-2` |
+| Gemma 3 | `gemma3_instruction` |
+| Gemma | `gemma_instruction` |
+| Qwen 3.5 | `qwen3_5` |
+| Qwen 3 | `qwen3` |
+| Qwen 2 / 2.5 | `qwen2` |
+| Nemotron | `nemotron` |
+| ChatML-style (e.g. Hermes 2) | `chatml` |
+
+**Example (auto-inferred — recommended for beginners):**
+
+```bash
+curl -N -X POST http://localhost:8000/quantize \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
+```
+
+**Example (explicit template):**
 
 ```bash
 curl -N -X POST http://localhost:8000/quantize \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "models/TinyLlama-1.1B-Chat-v1.0",
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "quant": "q4f16_1",
     "device": "cuda",
-    "conv_template": "llama-2"
+    "conv_template": "tinyllama_v1_0"
   }'
 ```
+
 
 **Example stream output:**
 
@@ -287,8 +357,39 @@ data: [DONE]
 ```
 
 **Notes:**
-- The `model` field accepts both relative workspace paths (`models/MyModel`) and absolute paths (`/workspace/mlc-cli/models/MyModel`).
+- The `model` field accepts Hugging Face model IDs (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`). The API will download the weights automatically.
+- For private or gated Hugging Face models, ensure your container has the necessary access token configured.
+- The `model` field also accepts relative workspace paths (`models/MyModel`) and absolute paths (`/workspace/mlc-cli/models/MyModel`).
 - The output directory will be discoverable via `/artifacts` after quantization.
+
+**Advanced: Using local model weights**
+
+If you prefer to provide model weights manually instead of letting the API download them:
+
+Raw model weights need to be placed under `/workspace/mlc-cli/models/<ModelName>/`.
+
+**Option A — Download inside the container:**
+
+```bash
+docker compose exec web bash
+cd /workspace/mlc-cli
+mkdir -p models
+
+# Example: download or copy your Hugging Face model into models/<ModelName>
+# If git-lfs is available in your environment:
+# git clone https://huggingface.co/<org>/<ModelName> models/<ModelName>
+```
+
+**Option B — Copy model files from your host:**
+
+```bash
+docker compose cp /path/to/your/model web:/workspace/mlc-cli/models/
+```
+
+**Option C — Mount a host directory:**
+
+Add a volume mount in `docker-compose.yml` to point a host model directory
+at `/workspace/mlc-cli/models`.
 
 ---
 

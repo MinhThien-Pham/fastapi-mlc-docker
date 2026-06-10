@@ -20,6 +20,8 @@ from app.helpers import (
     build_run_command,
     detect_known_failure,
     discover_artifacts,
+    get_supported_conv_templates,
+    prepare_conv_template_for_quantize,
     run_tool_check,
     resolve_chat_artifacts,
 )
@@ -137,16 +139,61 @@ QUANT_OPTIONS = Literal[
 ]
 
 CONV_TEMPLATE_OPTIONS = Literal[
-    "llama-3.1",
+    "auto",
+    "llama-4",
+    "llama-3_1",
     "llama-3",
     "llama-2",
     "chatml",
+    "chatml_nosystem",
     "mistral_default",
-    "ministral",
+    "ministral3",
+    "ministral3_reasoning",
+    "phi-4",
     "phi-3",
+    "phi-3-vision",
     "phi-2",
-    "gemma",
+    "gemma3_instruction",
+    "gemma_instruction",
+    "qwen3_5",
+    "qwen3_5_nothink",
+    "qwen3",
     "qwen2",
+    "deepseek_v3",
+    "deepseek_v2",
+    "deepseek_r1_qwen",
+    "deepseek_r1_llama",
+    "deepseek",
+    "hermes3_llama-3_1",
+    "hermes2_pro_llama3",
+    "open_hermes_mistral",
+    "neural_hermes_mistral",
+    "tinyllama_v1_0",
+    "nemotron",
+    "gorilla",
+    "gorilla-openfunctions-v2",
+    "gpt2",
+    "gpt_bigcode",
+    "dolly",
+    "oasst",
+    "glm",
+    "olmo",
+    "olmo2",
+    "orion",
+    "llava",
+    "llm-jp",
+    "redpajama_chat",
+    "rwkv_world",
+    "stablelm",
+    "stablelm-3b",
+    "stablelm-2",
+    "wizardlm_7b",
+    "wizard_coder_or_math",
+    "LM",
+    "aya-23",
+    "codellama_completion",
+    "codellama_instruct",
+    "llama_default",
 ]
 
 
@@ -158,11 +205,15 @@ class QuantizeRequest(BaseModel):
 
     The mlc-cli ``quantize`` sub-command drives the conversion: it first calls
     ``mlc_llm convert_weight`` and then ``mlc_llm gen_config``.
+
+    ``conv_template`` defaults to ``"auto"``, which infers the correct MLC
+    conversation template from the model name.  Pass an explicit template name
+    to override inference.
     """
     model: str
     quant: QUANT_OPTIONS = "q4f16_1"  # type: ignore[valid-type]
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
-    conv_template: CONV_TEMPLATE_OPTIONS = "llama-3"  # type: ignore[valid-type]
+    conv_template: str = "auto"
     # Optional: if empty, mlc-cli derives a default from model name + quant
     output: str = ""
 
@@ -554,7 +605,7 @@ def repo_status():
     }
 
 
-# ── Build endpoint ─────────────────────────────────────────────────────────────
+# ── Build endpoint ────────────────────────────────────────────────────────────
 
 @app.post("/build")
 async def build(req: BuildRequest):
@@ -590,7 +641,7 @@ async def build(req: BuildRequest):
     )
 
 
-# ── Quantize endpoint ────────────────────────────────────────────────────────────────
+# ── Quantize endpoint ─────────────────────────────────────────────────
 
 @app.post("/quantize")
 @app.post("/convert", include_in_schema=False)
@@ -606,11 +657,15 @@ async def quantize_model(req: QuantizeRequest):
     If ``output`` is omitted, mlc-cli derives a default path of the form
     ``dist/<model_basename>-<quant>-MLC``.
 
-    Example — quantize a locally-cloned Llama-3 8B model::
+    ``conv_template`` defaults to ``"auto"``, which automatically selects
+    the right MLC conversation template based on the model name.  Pass an
+    explicit template name if you need to override the inferred value.
 
-        curl -N -X POST http://localhost:8000/quantize \\
-             -H 'Content-Type: application/json' \\
-             -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+    Example — quantize TinyLlama (conv_template auto-inferred)::
+
+        curl -N -X POST http://localhost:8000/quantize \\\
+             -H 'Content-Type: application/json' \\\
+             -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
 
     Each SSE line is prefixed with ``data: ``.
     The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
@@ -620,6 +675,16 @@ async def quantize_model(req: QuantizeRequest):
         async def error_stream():
             yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    # ── Resolve conv_template before any I/O ────────────────────────────────
+    try:
+        resolved_template, template_messages = prepare_conv_template_for_quantize(
+            model=req.model,
+            requested_template=req.conv_template,
+            mlc_cli_path=MLC_CLI_PATH,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # ── Normalize model path: resolve relative paths against known roots ─────
     model_path = Path(req.model)
@@ -641,12 +706,19 @@ async def quantize_model(req: QuantizeRequest):
             )
         return StreamingResponse(model_error_stream(), media_type="text/event-stream")
 
-    req = req.model_copy(update={"model": str(resolved_model)})
+    req = req.model_copy(update={"model": str(resolved_model), "conv_template": resolved_template})
 
     cmd = build_quantize_command(req)
 
+    async def _quantize_stream():
+        # Emit conv_template info/warnings before mlc-cli output.
+        for msg in template_messages:
+            yield msg
+        async for chunk in stream_subprocess(cmd, cwd=MLC_CLI_PATH):
+            yield chunk
+
     return StreamingResponse(
-        stream_subprocess(cmd, cwd=MLC_CLI_PATH),
+        _quantize_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -655,7 +727,32 @@ async def quantize_model(req: QuantizeRequest):
     )
 
 
-# ── Compile endpoint ────────────────────────────────────────────────────────────────
+# ── Conv-templates endpoint ───────────────────────────────────────────────────
+
+@app.get("/conv-templates")
+def list_conv_templates():
+    """Return the set of supported conv_template values for POST /quantize.
+
+    The list is loaded from the pinned mlc-llm source bundled in the Docker
+    image (``mlc-llm/python/mlc_llm/interface/gen_config.py``) and falls back
+    to a hardcoded list if the source is not available.
+
+    Example::
+
+        curl http://localhost:8000/conv-templates
+    """
+    supported = get_supported_conv_templates(MLC_CLI_PATH)
+    return {
+        "templates": sorted(supported),
+        "default": "auto",
+        "note": (
+            "Use \"auto\" (the default) to let the API infer the template from "
+            "the model name. Pass an explicit name only to override inference."
+        ),
+    }
+
+
+
 
 @app.post("/compile")
 async def compile_model(req: CompileRequest):

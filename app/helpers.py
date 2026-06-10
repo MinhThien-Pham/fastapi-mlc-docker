@@ -8,15 +8,20 @@ All functions here are side-effect-free or have their side effects
 
 Functions
 ---------
-detect_known_failure   – detect known build-log failure signatures
-run_tool_check         – thin wrapper around subprocess for tool availability
-build_mlc_cli_command  – construct ``go run . build`` argv list
-build_convert_command  – construct ``go run . quantize`` argv list
+detect_known_failure         – detect known build-log failure signatures
+run_tool_check               – thin wrapper around subprocess for tool availability
+build_mlc_cli_command        – construct ``go run . build`` argv list
+build_convert_command        – construct ``go run . quantize`` argv list
+get_supported_conv_templates – load the CONV_TEMPLATES set from pinned mlc-llm source
+infer_conv_template_for_model – heuristic model-name → template name mapping
+prepare_conv_template_for_quantize – resolve + warn before /quantize calls mlc-cli
 """
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -401,3 +406,259 @@ def resolve_chat_artifacts(
         raise ValueError(f"Multiple compiled libraries found for '{resolved_model_dir.name}' and device '{base_device}'. Please specify 'quant' to disambiguate.")
 
     return str(resolved_model_dir), str(lib_matches[0])
+
+
+# ── Conv-template helpers ─────────────────────────────────────────────────────
+
+# Fallback list derived from mlc-llm gen_config.py CONV_TEMPLATES set at the
+# pinned MLC_LLM_REF=2008fe8343e1f40ef89ee57b9287aebcf1b86c98.
+# Update when the pinned ref is bumped.
+_FALLBACK_CONV_TEMPLATES: frozenset[str] = frozenset({
+    "LM",
+    "aya-23",
+    "chatml",
+    "chatml_nosystem",
+    "codellama_completion",
+    "codellama_instruct",
+    "deepseek",
+    "deepseek_r1_llama",
+    "deepseek_r1_qwen",
+    "deepseek_v2",
+    "deepseek_v3",
+    "dolly",
+    "gemma_instruction",
+    "gemma3_instruction",
+    "glm",
+    "gorilla",
+    "gorilla-openfunctions-v2",
+    "gpt2",
+    "gpt_bigcode",
+    "hermes2_pro_llama3",
+    "hermes3_llama-3_1",
+    "llama-2",
+    "llama-3",
+    "llama-3_1",
+    "llama-4",
+    "llama_default",
+    "llava",
+    "llm-jp",
+    "ministral3",
+    "ministral3_reasoning",
+    "mistral_default",
+    "nemotron",
+    "neural_hermes_mistral",
+    "oasst",
+    "olmo",
+    "olmo2",
+    "open_hermes_mistral",
+    "orion",
+    "phi-2",
+    "phi-3",
+    "phi-3-vision",
+    "phi-4",
+    "qwen2",
+    "qwen3",
+    "qwen3_5",
+    "qwen3_5_nothink",
+    "redpajama_chat",
+    "rwkv_world",
+    "stablelm",
+    "stablelm-2",
+    "stablelm-3b",
+    "tinyllama_v1_0",
+    "wizard_coder_or_math",
+    "wizardlm_7b",
+})
+
+
+def get_supported_conv_templates(mlc_cli_path: Path) -> frozenset[str]:
+    """Return the set of supported conv_template names from the pinned runtime.
+
+    Preferred source: parse the CONV_TEMPLATES set from
+    ``<mlc_cli_path>/mlc-llm/python/mlc_llm/interface/gen_config.py``
+    using the ``ast`` module (no import of mlc_llm required).
+
+    Falls back to the hardcoded ``_FALLBACK_CONV_TEMPLATES`` set if the file
+    cannot be found or parsed.
+    """
+    gen_config_py = (
+        mlc_cli_path / "mlc-llm" / "python" / "mlc_llm" / "interface" / "gen_config.py"
+    )
+    if not gen_config_py.is_file():
+        return _FALLBACK_CONV_TEMPLATES
+
+    try:
+        source = gen_config_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(gen_config_py))
+    except (OSError, SyntaxError):
+        return _FALLBACK_CONV_TEMPLATES
+
+    for node in ast.walk(tree):
+        # Look for:  CONV_TEMPLATES = { ... }
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = node.targets
+        if len(targets) != 1:
+            continue
+        if not (isinstance(targets[0], ast.Name) and targets[0].id == "CONV_TEMPLATES"):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, (set, frozenset)):
+            return frozenset(str(v) for v in value)
+
+    return _FALLBACK_CONV_TEMPLATES
+
+
+# Models whose names match these patterns CANNOT be auto-inferred safely.
+# They appear to require custom (gpt-oss / harmony) templates that are not
+# registered in the current runtime.
+_UNSUPPORTED_AUTO_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\bgpt.?oss\b", re.IGNORECASE),
+    re.compile(r"\bharmon[yi]\b", re.IGNORECASE),
+]
+
+
+def infer_conv_template_for_model(
+    model: str,
+    supported_templates: frozenset[str],
+) -> str | None:
+    """Heuristically infer a supported conv_template from a model identifier.
+
+    Matches against the Hugging Face model ID or local path basename.
+    Checks that the inferred template actually exists in *supported_templates*.
+
+    Returns the template name if found, or ``None`` if no confident match.
+    """
+    # Normalise: use the basename of a HF ID or local path, lower-cased.
+    name = model.split("/")[-1].lower().replace("-", "_").replace(".", "_")
+
+    # Ordered: more-specific patterns first so they match before shorter ones.
+    _RULES: list[tuple[re.Pattern[str], str]] = [
+        # TinyLlama
+        (re.compile(r"tinyllama"),                         "tinyllama_v1_0"),
+        # Hermes variants (must come before plain llama)
+        (re.compile(r"hermes.*3.*llama.*3.*1|hermes.*3_1.*llama"), "hermes3_llama-3_1"),
+        (re.compile(r"hermes.*2.*llama.*3|hermes.*2.*pro.*llama"), "hermes2_pro_llama3"),
+        (re.compile(r"openhermes.*mistral|open_hermes.*mistral"), "open_hermes_mistral"),
+        (re.compile(r"neuralhermes.*mistral|neural_hermes.*mistral"), "neural_hermes_mistral"),
+        # Nemotron (must come before llama-3_1 since some Nemotron names include Llama-3.1)
+        (re.compile(r"nemotron"),                          "nemotron"),
+        # DeepSeek — most-specific first
+        (re.compile(r"deepseek.*r1.*llama"),               "deepseek_r1_llama"),
+        (re.compile(r"deepseek.*r1.*qwen"),                "deepseek_r1_qwen"),
+        (re.compile(r"deepseek.*v3"),                      "deepseek_v3"),
+        (re.compile(r"deepseek.*v2"),                      "deepseek_v2"),
+        (re.compile(r"deepseek"),                          "deepseek"),
+        # Llama family
+        (re.compile(r"llama.*4"),                          "llama-4"),
+        (re.compile(r"llama.*3.*1|llama.*3_1"),            "llama-3_1"),
+        (re.compile(r"llama.*3"),                          "llama-3"),
+        (re.compile(r"llama.*2"),                          "llama-2"),
+        # Mistral / Ministral
+        (re.compile(r"ministral.*3"),                      "ministral3"),
+        (re.compile(r"mistral|mixtral"),                   "mistral_default"),
+        # Phi — exact version digits. After normalisation, separators become "_".
+        # We match the version digit and ensure the NEXT character (if any) is not
+        # also a digit, so phi_4 does not accidentally match phi_40 or phi_3 match phi_4.
+        (re.compile(r"phi[_]*4(?:\D|$)"),                  "phi-4"),
+        (re.compile(r"phi[_]*3(?:\D|$)"),                  "phi-3"),
+        (re.compile(r"phi[_]*2(?:\D|$)"),                  "phi-2"),
+        # Gemma
+        (re.compile(r"gemma.*3|gemma3"),                   "gemma3_instruction"),
+        (re.compile(r"gemma"),                             "gemma_instruction"),
+        # Qwen — most-specific first
+        (re.compile(r"qwen.*3.*5|qwen3_5"),               "qwen3_5"),
+        (re.compile(r"qwen.*3"),                           "qwen3"),
+        (re.compile(r"qwen.*2.*5|qwen.*2"),               "qwen2"),
+    ]
+
+    for pattern, template in _RULES:
+        if pattern.search(name):
+            # Only return the template if the current runtime actually supports it.
+            if template in supported_templates:
+                return template
+    return None
+
+
+def prepare_conv_template_for_quantize(
+    model: str,
+    requested_template: str,
+    mlc_cli_path: Path,
+) -> tuple[str, list[str]]:
+    """Resolve the conv_template for a /quantize request.
+
+    Parameters
+    ----------
+    model:
+        The model identifier (HF ID or local path) from the request.
+    requested_template:
+        The ``conv_template`` field value from the request.
+        ``"auto"`` triggers inference; anything else is an explicit choice.
+    mlc_cli_path:
+        Path to the mlc-cli workspace (used to load the live template list).
+
+    Returns
+    -------
+    (resolved_template, messages)
+        ``resolved_template`` is the template string to pass to mlc-cli.
+        ``messages`` is a list of ``data: [INFO/WARNING] ...\\n\\n`` SSE lines
+        to emit *before* mlc-cli output.
+
+    Raises
+    ------
+    ValueError
+        Only in ``"auto"`` mode when no template can be safely inferred.
+    """
+    supported = get_supported_conv_templates(mlc_cli_path)
+    messages: list[str] = []
+
+    if requested_template == "auto":
+        # Block known-unsupported model families immediately.
+        model_lower = model.lower()
+        for pat in _UNSUPPORTED_AUTO_PATTERNS:
+            if pat.search(model_lower):
+                raise ValueError(
+                    f"Could not infer a supported conv_template for '{model}'. "
+                    "This model appears to require a custom template such as Harmony "
+                    "or gpt-oss, but the current runtime does not list harmony/gpt-oss "
+                    "as supported. Pass conv_template explicitly only if you intentionally "
+                    "want to experiment."
+                )
+
+        inferred = infer_conv_template_for_model(model, supported)
+        if inferred is None:
+            raise ValueError(
+                f"Could not infer conv_template for '{model}'. "
+                "Pass conv_template explicitly. "
+                "See GET /conv-templates for the supported list."
+            )
+
+        messages.append(
+            f"data: [INFO] Auto-selected conv_template='{inferred}' "
+            f"for model '{model}'.\n\n"
+        )
+        return inferred, messages
+
+    # Explicit template path.
+    # Warn if the template is not in the known supported list.
+    if requested_template not in supported:
+        messages.append(
+            f"data: [WARNING] conv_template='{requested_template}' was not found in the "
+            "current runtime template list. mlc-cli may warn or produce a broken chat "
+            "config.\n\n"
+        )
+        return requested_template, messages
+
+    # Template is known — optionally warn on likely mismatch.
+    inferred = infer_conv_template_for_model(model, supported)
+    if inferred is not None and inferred != requested_template:
+        messages.append(
+            f"data: [WARNING] Model '{model}' usually maps to "
+            f"conv_template='{inferred}', but request used "
+            f"'{requested_template}'. Behavior may be incorrect.\n\n"
+        )
+
+    return requested_template, messages
