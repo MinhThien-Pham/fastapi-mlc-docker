@@ -40,7 +40,10 @@ def clean_engine_state():
 def mock_paths():
     """Treat all paths as valid so load_engine never rejects dummy paths."""
     with patch("os.path.isdir", return_value=True), \
-         patch("os.path.isfile", return_value=True):
+         patch("os.path.isfile", return_value=True), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("pathlib.Path.is_dir", return_value=True), \
+         patch("pathlib.Path.is_file", return_value=True):
         yield
 
 
@@ -107,6 +110,85 @@ class TestChatLifecycle:
             model="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
             model_lib="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
             device="cuda:0",
+        )
+
+    def test_step2b_load_engine_explicit_model_name_bare(self, client, mock_engine_class):
+        """POST /chat/load explicit mode supports bare model_name."""
+        resp = client.post("/chat/load", json={
+            "model_name": "MyModel-q4f16_1-MLC",
+            "model_lib": "dist/MyModel-q4f16_1-MLC/MyModel.so",
+            "device": "cuda:0",
+        })
+        assert resp.status_code == 200
+        
+        mock_engine_class.assert_called_once_with(
+            model="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+            model_lib="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
+            device="cuda:0",
+        )
+
+    def test_step2c_load_engine_missing_model_with_lib(self, client, mock_engine_class):
+        """POST /chat/load with model_lib but no model or model_name returns 400."""
+        resp = client.post("/chat/load", json={
+            "model_lib": "dist/MyModel-q4f16_1-MLC/MyModel.so",
+        })
+        assert resp.status_code == 400
+        assert "model or model_name is required" in resp.json()["detail"]
+        mock_engine_class.assert_not_called()
+
+    def test_step2d_load_engine_shorthand(self, client, mock_engine_class):
+        """POST /chat/load succeeds with shorthand model payload."""
+        # Mock resolve_chat_artifacts to verify router integration without needing a real dist/ structure.
+        with patch("app.main.resolve_chat_artifacts") as mock_resolve:
+            mock_resolve.return_value = (
+                "/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+                "/workspace/mlc-cli/dist/libs/MyModel-q4f16_1-MLC-q4f16_1-cuda.so"
+            )
+            resp = client.post("/chat/load", json={
+                "model": "MyModel",
+                "device": "cuda:0",
+            })
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "success"
+
+            mock_resolve.assert_called_once()
+            
+            # MLCEngine was constructed exactly once with the right arguments
+            mock_engine_class.assert_called_once_with(
+                model="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+                model_lib="/workspace/mlc-cli/dist/libs/MyModel-q4f16_1-MLC-q4f16_1-cuda.so",
+                device="cuda:0",
+            )
+
+    def test_step2e_load_engine_device_normalization(self, client, mock_engine_class):
+        """POST /chat/load normalizes 'cuda' to 'cuda:0' but leaves others unchanged."""
+        client.post("/chat/unload")
+        # Test 'cuda' becomes 'cuda:0'
+        resp1 = client.post("/chat/load", json={
+            "model": "/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+            "model_lib": "/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
+            "device": "cuda",
+        })
+        assert resp1.status_code == 200
+        mock_engine_class.assert_called_with(
+            model="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+            model_lib="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
+            device="cuda:0",
+        )
+        
+        client.post("/chat/unload")
+        # Test 'vulkan' stays 'vulkan'
+        resp2 = client.post("/chat/load", json={
+            "model": "/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+            "model_lib": "/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
+            "device": "vulkan",
+        })
+        assert resp2.status_code == 200
+        mock_engine_class.assert_called_with(
+            model="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC",
+            model_lib="/workspace/mlc-cli/dist/MyModel-q4f16_1-MLC/MyModel.so",
+            device="vulkan",
         )
 
     def test_step3_status_after_load_shows_loaded(self, client, mock_engine_class):

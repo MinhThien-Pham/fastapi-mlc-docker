@@ -2,7 +2,7 @@ import os
 import sys
 import httpx
 
-API_URL = "http://localhost:8000"
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 def stream_endpoint(client, method, url, json_payload=None):
     """Helper to stream SSE responses and print them live."""
@@ -26,7 +26,7 @@ def stream_endpoint(client, method, url, json_payload=None):
 
 def main():
     print("=== MLC-CLI Integration Smoke Test ===")
-    print("Ensure the FastAPI app is running at http://localhost:8000")
+    print(f"Ensure the FastAPI app is running at {API_URL}")
     
     with httpx.Client(base_url=API_URL, timeout=None) as client:
         # 1. Health check
@@ -46,13 +46,10 @@ def main():
         setup_data = resp.json()
         print(f"   -> Repo exists: {setup_data.get('repo_exists')}")
         
-        # 3. Ensure repo exists
-        print("\n3. Ensuring mlc-cli repo exists (/ensure-repo-exists)...")
-        if not setup_data.get("repo_exists"):
-            client.post("/ensure-repo-exists").raise_for_status()
-            print("   -> Repo cloned successfully.")
-        else:
-            print("   -> Repo already exists, skipping clone.")
+        # 3. Check baked repo status
+        print("\n3. Checking baked mlc-cli repo status (/repo-status)...")
+        client.get("/repo-status").raise_for_status()
+        print("   -> Checked repo status successfully.")
 
         # 4. Repo status
         print("\n4. Checking repo status (/repo-status)...")

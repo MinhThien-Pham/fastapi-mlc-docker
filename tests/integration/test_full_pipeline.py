@@ -4,7 +4,7 @@ import httpx
 import shutil
 import subprocess
 
-API_URL = "http://localhost:8000"
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 def fetch_json(client, url):
     """Helper to fetch and parse JSON with error raising."""
@@ -81,7 +81,7 @@ def auto_detect_conv_template(raw_model_path: str) -> tuple:
 
 def main():
     print("=== MLC-CLI Full Pipeline Integration Test ===")
-    print("Ensure the FastAPI app is running at http://localhost:8000")
+    print(f"Ensure the FastAPI app is running at {API_URL}")
     
     # 1. Fetch Environment Variables
     full_raw_model = os.environ.get("FULL_RAW_MODEL")
@@ -166,12 +166,12 @@ def main():
             print("\n2. Checking setup (/setup-check)...")
             setup_data = fetch_json(client, "/setup-check")
             
-            print("\n3. Ensuring mlc-cli repo exists (/ensure-repo-exists)...")
-            if not setup_data.get("repo_exists"):
-                client.post("/ensure-repo-exists").raise_for_status()
-                
-            print("\n4. Checking repo status (/repo-status)...")
+            print("\n3. Checking baked mlc-cli repo status (/repo-status)...")
             client.get("/repo-status").raise_for_status()
+            
+            print("\n4. Confirming setup is healthy...")
+            if not setup_data.get("repo_exists"):
+                print("   -> Warning: setup_data indicates repo does not exist.")
 
             # Step 5: Build
             print(f"\n5. Testing /build stream (action: {full_build_action})...")

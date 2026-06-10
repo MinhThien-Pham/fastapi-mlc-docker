@@ -6,6 +6,7 @@ __pycache__/
 # Environments
 .env
 .venv
+.venv_test
 env/
 venv/
 ENV/
@@ -35,5 +36,7 @@ mlc-cli/
 
 # Other
 .ai/
-
 logs/*
+
+# Candidate verification local state
+.mlc-cli-verify/

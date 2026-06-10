@@ -1,25 +1,15 @@
 """
-tests/test_setup_check.py
-~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/unit/test_setup_check.py
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Tests for the GET /setup-check endpoint.
-
-We monkeypatch:
-  - app.main.MLC_CLI_PATH  →  a real tmp_path so Path.exists() works naturally
-  - subprocess.run          →  a lightweight mock so no real Go/conda/GPU needed
-
-All tests run on any developer machine — no CUDA, Go, or Conda required.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-# ── Test helpers ──────────────────────────────────────────────────────────────
-
 def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
-    """Build a fake subprocess.CompletedProcess-like mock."""
     m = MagicMock()
     m.stdout = stdout
     m.stderr = ""
@@ -27,148 +17,141 @@ def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
     return m
 
 
-def _all_tools_ok(cmd: list[str], **_kwargs) -> MagicMock:
-    """subprocess.run side-effect: every tool reports success."""
-    if cmd[0] == "go":
-        return _proc("go version go1.24.0 linux/amd64")
-    if cmd[0] == "conda":
-        return _proc("conda 24.1.0")
-    if cmd[0] == "nvidia-smi":
-        return _proc("NVIDIA GeForce RTX 3090")
-    if cmd[0] == "nvcc":
-        return _proc("nvcc: NVIDIA (R) Cuda compiler driver, V12.6.0")
-    # git remote get-url origin
-    return _proc("https://github.com/ballinyouup/mlc-cli.git")
+def _run_command_ok(cmd: list[str], **_kwargs) -> MagicMock:
+    if cmd == ["python", "--version"]:
+        return _proc("Python 3.13.0")
+    if cmd == ["python", "-c", "import mlc_llm"]:
+        return _proc("")
+    if cmd == ["python", "-c", "import tvm"]:
+        return _proc("")
+    return _proc("")
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
-
-class TestSetupCheckRepoMissing:
-    """Repo does not exist on disk."""
-
-    def test_returns_200(self, client, monkeypatch, tmp_path):
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            resp = client.get("/setup-check")
-        assert resp.status_code == 200
-
-    def test_repo_exists_is_false(self, client, monkeypatch, tmp_path):
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert data["repo_exists"] is False
-        assert data["checks"]["repo"]["available"] is False
-
-    def test_status_is_warning_when_tools_are_present(self, client, monkeypatch, tmp_path):
-        """Repo missing but tools ok → warning (it can be cloned on demand)."""
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert data["status"] == "warning"
-
-    def test_repo_output_contains_helpful_hint(self, client, monkeypatch, tmp_path):
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "nonexistent")
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        output = data["checks"]["repo"]["output"].lower()
-        assert "ensure-repo-exists" in output
+def _tool_check_ok(cmd: list[str]) -> dict:
+    return {"available": True, "output": "ok", "returncode": 0}
 
 
-class TestSetupCheckAllOk:
-    """Repo exists and every tool is available."""
-
-    def test_status_is_ok(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert data["status"] == "ok"
-
-    def test_repo_exists_is_true(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert data["repo_exists"] is True
-        assert data["checks"]["repo"]["available"] is True
-
-    def test_all_tool_checks_are_available(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        checks = data["checks"]
-        assert checks["go"]["available"] is True
-        assert checks["conda"]["available"] is True
-        assert checks["nvidia_smi"]["available"] is True
-        assert checks["nvcc"]["available"] is True
-
-    def test_no_warnings_when_everything_ok(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert data["warnings"] == []
-
-    def test_origin_is_populated(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=_all_tools_ok):
-            data = client.get("/setup-check").json()
-        assert "origin" in data["checks"]["repo"]
-        assert "github" in data["checks"]["repo"]["origin"].lower()
+def _make_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    versions = workspace / "scripts" / "config"
+    versions.mkdir(parents=True)
+    (versions / "versions.sh").write_text('PYTHON_VERSION="3.13"\n')
+    for name in ["models", "dist", "wheels"]:
+        (workspace / name).mkdir()
+    return workspace
 
 
-class TestSetupCheckMissingTools:
-    """Individual tools are unavailable."""
+def test_setup_check_reports_baked_wrapper_info(client, monkeypatch, tmp_path):
+    workspace = _make_workspace(tmp_path)
+    baked = tmp_path / "baked"
 
-    def _make_mock(self, fail_cmd: str):
-        """Return a subprocess mock where *fail_cmd* raises FileNotFoundError."""
-        def side_effect(cmd: list[str], **kwargs) -> MagicMock:
-            if cmd[0] == fail_cmd:
-                raise FileNotFoundError(f"{fail_cmd} not found")
-            return _all_tools_ok(cmd, **kwargs)
-        return side_effect
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+    monkeypatch.setattr("app.main.BAKED_MLC_CLI_PATH", baked)
 
-    def test_missing_go_makes_status_error(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=self._make_mock("go")):
-            data = client.get("/setup-check").json()
-        assert data["checks"]["go"]["available"] is False
-        assert data["status"] == "error"
+    with patch("app.main.run_command", side_effect=_run_command_ok), \
+         patch("app.main.run_tool_check", side_effect=_tool_check_ok), \
+         patch("app.main.git_head", side_effect=["sha-baked", "sha-baked"]), \
+         patch("app.main.read_text_file", return_value="sha-baked"):
+        resp = client.get("/setup-check")
 
-    def test_missing_conda_makes_status_error(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=self._make_mock("conda")):
-            data = client.get("/setup-check").json()
-        assert data["checks"]["conda"]["available"] is False
-        assert data["status"] == "error"
+    assert resp.status_code == 200
+    data = resp.json()
 
-    def test_missing_nvidia_smi_adds_warning(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=self._make_mock("nvidia-smi")):
-            data = client.get("/setup-check").json()
-        assert data["checks"]["nvidia_smi"]["available"] is False
-        # GPU missing is a warning, not an error (build might still work for CPU-only)
-        assert len(data["warnings"]) > 0
-        assert any("nvidia" in w.lower() or "gpu" in w.lower() for w in data["warnings"])
+    assert data["status"] == "ok"
+    assert data["repo_exists"] is True
+    assert data["checks"]["repo"]["available"] is True
 
-    def test_missing_nvcc_adds_warning(self, client, monkeypatch, tmp_path):
-        fake_repo = tmp_path / "mlc-cli"
-        fake_repo.mkdir()
-        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
-        with patch("subprocess.run", side_effect=self._make_mock("nvcc")):
-            data = client.get("/setup-check").json()
-        assert data["checks"]["nvcc"]["available"] is False
-        assert len(data["warnings"]) > 0
+    info = data["wrapper_info"]
+    assert info["mlc_cli_path"] == str(workspace)
+    assert info["baked_mlc_cli_path"] == str(baked)
+    assert info["baked_ref"] == "sha-baked"
+    assert info["baked_actual_head"] == "sha-baked"
+    assert info["workspace_head"] == "sha-baked"
+    assert info["workspace_matches_baked"] is True
+    assert info["python_runtime_version"] == "Python 3.13.0"
+    assert info["expected_python_version"] == "3.13"
+    assert info["python_match"] is True
+    assert info["mlc_llm_importable"] is True
+    assert info["tvm_importable"] is True
+    assert info["artifact_dirs_present"]["models"] is True
+    assert info["artifact_dirs_present"]["dist"] is True
+    assert info["artifact_dirs_present"]["wheels"] is True
+
+
+def test_setup_check_missing_workspace_is_warning_when_critical_tools_exist(client, monkeypatch, tmp_path):
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", tmp_path / "missing-workspace")
+    monkeypatch.setattr("app.main.BAKED_MLC_CLI_PATH", tmp_path / "baked")
+
+    with patch("app.main.run_command", side_effect=_run_command_ok), \
+         patch("app.main.run_tool_check", side_effect=_tool_check_ok), \
+         patch("app.main.git_head", return_value=None), \
+         patch("app.main.read_text_file", return_value=None):
+        resp = client.get("/setup-check")
+
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["repo_exists"] is False
+    assert data["status"] == "warning"
+    assert data["checks"]["repo"]["available"] is False
+    assert "workspace not found" in data["checks"]["repo"]["output"].lower()
+
+
+def test_setup_check_missing_go_makes_status_error(client, monkeypatch, tmp_path):
+    workspace = _make_workspace(tmp_path)
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+
+    def tool_check(cmd: list[str]) -> dict:
+        if cmd[0] == "go":
+            return {"available": False, "output": "go not found", "returncode": None}
+        return _tool_check_ok(cmd)
+
+    with patch("app.main.run_command", side_effect=_run_command_ok), \
+         patch("app.main.run_tool_check", side_effect=tool_check), \
+         patch("app.main.git_head", return_value="sha"), \
+         patch("app.main.read_text_file", return_value="sha"):
+        data = client.get("/setup-check").json()
+
+    assert data["checks"]["go"]["available"] is False
+    assert data["status"] == "error"
+
+
+def test_setup_check_missing_conda_makes_status_error(client, monkeypatch, tmp_path):
+    workspace = _make_workspace(tmp_path)
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+
+    def tool_check(cmd: list[str]) -> dict:
+        if cmd[0] == "conda":
+            return {"available": False, "output": "conda not found", "returncode": None}
+        return _tool_check_ok(cmd)
+
+    with patch("app.main.run_command", side_effect=_run_command_ok), \
+         patch("app.main.run_tool_check", side_effect=tool_check), \
+         patch("app.main.git_head", return_value="sha"), \
+         patch("app.main.read_text_file", return_value="sha"):
+        data = client.get("/setup-check").json()
+
+    assert data["checks"]["conda"]["available"] is False
+    assert data["status"] == "error"
+
+
+def test_setup_check_missing_gpu_tools_adds_warning(client, monkeypatch, tmp_path):
+    workspace = _make_workspace(tmp_path)
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+
+    def tool_check(cmd: list[str]) -> dict:
+        if cmd[0] in {"nvidia-smi", "nvcc"}:
+            return {"available": False, "output": f"{cmd[0]} not found", "returncode": None}
+        return _tool_check_ok(cmd)
+
+    with patch("app.main.run_command", side_effect=_run_command_ok), \
+         patch("app.main.run_tool_check", side_effect=tool_check), \
+         patch("app.main.git_head", return_value="sha"), \
+         patch("app.main.read_text_file", return_value="sha"):
+        data = client.get("/setup-check").json()
+
+    assert data["status"] == "ok"
+    assert data["checks"]["nvidia_smi"]["available"] is False
+    assert data["checks"]["nvcc"]["available"] is False
+    assert data["warnings"]
+    assert any("nvidia" in w.lower() or "gpu" in w.lower() for w in data["warnings"])

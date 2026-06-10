@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,25 +20,21 @@ from app.helpers import (
     build_run_command,
     detect_known_failure,
     discover_artifacts,
-    get_git_dirty_state,
-    get_repo_alignment,
-    get_startup_alignment_message,
-    restore_tracked_changes,
+    get_supported_conv_templates,
+    prepare_conv_template_for_quantize,
     run_tool_check,
+    resolve_chat_artifacts,
 )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup: Log-only Local Alignment Check ───────────────────────────────
-    # Perform a lightweight check of the Bryan mlc-cli repo state.
-    # This is local-only and does not fetch or repair.
     try:
-        upstream_meta = Path("/app/.upstream-sha.json")
-        align = get_repo_alignment(MLC_CLI_PATH, upstream_meta)
-        msg = get_startup_alignment_message(align)
-        print(f"[BOOT] {msg}")
+        print(f"[BOOT] FastAPI wrapper starting...")
+        print(f"[BOOT] MLC_CLI_PATH: {MLC_CLI_PATH}")
+        print(f"[BOOT] BAKED_MLC_CLI_PATH: {BAKED_MLC_CLI_PATH}")
     except Exception as e:
-        print(f"[BOOT] Failed to perform startup repo alignment check: {e}")
+        print(f"[BOOT] Failed to log startup paths: {e}")
 
     try:
         yield
@@ -52,14 +49,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="FastAPI MLC-CLI", lifespan=lifespan)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-MLC_CLI_PATH = Path("/workspace/mlc-cli")
-MLC_CLI_URL = "https://github.com/ballinyouup/mlc-cli.git"
+MLC_CLI_PATH = Path(os.getenv("MLC_CLI_PATH", "/workspace/mlc-cli"))
+BAKED_MLC_CLI_PATH = Path(os.getenv("BAKED_MLC_CLI_PATH", "/opt/mlc-cli"))
 
 
 # ── Internal subprocess helpers ───────────────────────────────────────────────
 
 def run_command(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+
+def read_text_file(path: Path) -> str | None:
+    try:
+        return path.read_text().strip() if path.exists() else None
+    except Exception:
+        return None
+
+def git_head(repo_dir: Path) -> str | None:
+    if not repo_dir.exists():
+        return None
+    res = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], capture_output=True, text=True)
+    return res.stdout.strip() if res.returncode == 0 else None
 
 
 def run_git(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -130,16 +139,61 @@ QUANT_OPTIONS = Literal[
 ]
 
 CONV_TEMPLATE_OPTIONS = Literal[
-    "llama-3.1",
+    "auto",
+    "llama-4",
+    "llama-3_1",
     "llama-3",
     "llama-2",
     "chatml",
+    "chatml_nosystem",
     "mistral_default",
-    "ministral",
+    "ministral3",
+    "ministral3_reasoning",
+    "phi-4",
     "phi-3",
+    "phi-3-vision",
     "phi-2",
-    "gemma",
+    "gemma3_instruction",
+    "gemma_instruction",
+    "qwen3_5",
+    "qwen3_5_nothink",
+    "qwen3",
     "qwen2",
+    "deepseek_v3",
+    "deepseek_v2",
+    "deepseek_r1_qwen",
+    "deepseek_r1_llama",
+    "deepseek",
+    "hermes3_llama-3_1",
+    "hermes2_pro_llama3",
+    "open_hermes_mistral",
+    "neural_hermes_mistral",
+    "tinyllama_v1_0",
+    "nemotron",
+    "gorilla",
+    "gorilla-openfunctions-v2",
+    "gpt2",
+    "gpt_bigcode",
+    "dolly",
+    "oasst",
+    "glm",
+    "olmo",
+    "olmo2",
+    "orion",
+    "llava",
+    "llm-jp",
+    "redpajama_chat",
+    "rwkv_world",
+    "stablelm",
+    "stablelm-3b",
+    "stablelm-2",
+    "wizardlm_7b",
+    "wizard_coder_or_math",
+    "LM",
+    "aya-23",
+    "codellama_completion",
+    "codellama_instruct",
+    "llama_default",
 ]
 
 
@@ -151,11 +205,15 @@ class QuantizeRequest(BaseModel):
 
     The mlc-cli ``quantize`` sub-command drives the conversion: it first calls
     ``mlc_llm convert_weight`` and then ``mlc_llm gen_config``.
+
+    ``conv_template`` defaults to ``"auto"``, which infers the correct MLC
+    conversation template from the model name.  Pass an explicit template name
+    to override inference.
     """
     model: str
     quant: QUANT_OPTIONS = "q4f16_1"  # type: ignore[valid-type]
     device: Literal["cuda", "metal", "vulkan", "opencl", "rocm"] = "cuda"
-    conv_template: CONV_TEMPLATE_OPTIONS = "llama-3"  # type: ignore[valid-type]
+    conv_template: str = "auto"
     # Optional: if empty, mlc-cli derives a default from model name + quant
     output: str = ""
 
@@ -170,9 +228,11 @@ class CompileRequest(BaseModel):
 
 class ChatLoadRequest(BaseModel):
     """Request body for POST /chat/load to initialize the direct MLCEngine."""
-    model: str
-    model_lib: str
+    model: str = ""
+    model_name: str = ""
+    model_lib: str = ""
     device: str = "cuda:0"
+    quant: str = "q4f16_1"
 
 
 class ChatMessage(BaseModel):
@@ -215,13 +275,51 @@ def chat_load(req: ChatLoadRequest):
     Load the MLCEngine with the specified model and library.
     This is an explicit initialization step before any completions can be requested.
     """
+    if req.model_lib:
+        target_model = req.model_name if req.model_name else req.model
+        if not target_model:
+            raise HTTPException(status_code=400, detail="When model_lib is provided, model or model_name is required.")
+
+        model_path = Path(target_model)
+        if not model_path.is_absolute():
+            if not ("/" in target_model or "\\" in target_model) and target_model.endswith("-MLC"):
+                model_path = MLC_CLI_PATH / "dist" / target_model
+            else:
+                model_path = MLC_CLI_PATH / target_model
+        if not model_path.exists() or not model_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Model directory not found: {model_path}")
+
+        model_lib_path = Path(req.model_lib)
+        if not model_lib_path.is_absolute():
+            model_lib_path = MLC_CLI_PATH / req.model_lib
+        if not model_lib_path.exists() or not model_lib_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Model library file not found: {model_lib_path}")
+        
+        final_model = str(model_path)
+        final_model_lib = str(model_lib_path)
+    else:
+        try:
+            final_model, final_model_lib = resolve_chat_artifacts(
+                mlc_cli_path=MLC_CLI_PATH,
+                model=req.model,
+                model_name=req.model_name,
+                quant=req.quant,
+                device=req.device,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    engine_device = req.device
+    if engine_device == "cuda":
+        engine_device = "cuda:0"
+
     try:
         chat_engine_manager.load_engine(
-            model=req.model,
-            model_lib=req.model_lib,
-            device=req.device
+            model=final_model,
+            model_lib=final_model_lib,
+            device=engine_device
         )
-        return {"status": "success", "message": f"Engine loaded for model {req.model}"}
+        return {"status": "success", "message": f"Engine loaded for model {final_model}"}
     except chat_engine_manager.InvalidArtifactPathError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except chat_engine_manager.EngineConflictError as e:
@@ -391,17 +489,34 @@ def setup_check():
     ``test_pipeline.py``.
     """
     repo_exists = MLC_CLI_PATH.exists()
+    baked_head = git_head(BAKED_MLC_CLI_PATH)
+    workspace_head = git_head(MLC_CLI_PATH)
+
+    # ── Python checks ────────────────────────────────────────────────────────
+    py_version_res = run_command(["python", "--version"])
+    py_version = py_version_res.stdout.strip() if py_version_res.returncode == 0 else ""
+    
+    expected_py = None
+    versions_sh = MLC_CLI_PATH / "scripts" / "config" / "versions.sh"
+    if versions_sh.exists():
+        for line in versions_sh.read_text().splitlines():
+            if line.startswith("PYTHON_VERSION="):
+                expected_py = line.split("=", 1)[1].strip('"\'')
+                break
+
+    py_match = None
+    if expected_py and py_version:
+        py_match = expected_py in py_version
+
+    mlc_import = run_command(["python", "-c", "import mlc_llm"]).returncode == 0
+    tvm_import = run_command(["python", "-c", "import tvm"]).returncode == 0
 
     # ── Per-tool checks ───────────────────────────────────────────────────────
     checks: dict = {
         "repo": {
             "available": repo_exists,
             "path": str(MLC_CLI_PATH),
-            "output": (
-                ""
-                if repo_exists
-                else "mlc-cli repo not found — call POST /ensure-repo-exists first"
-            ),
+            "output": "" if repo_exists else "mlc-cli workspace not found",
         },
         "go":         run_tool_check(["go", "version"]),
         "conda":      run_tool_check(["conda", "--version"]),
@@ -409,20 +524,17 @@ def setup_check():
         "nvcc":       run_tool_check(["nvcc", "--version"]),
     }
 
-    # Enrich repo entry with remote URL when the repo is present
     if repo_exists:
-        git_check = run_tool_check(["git", "remote", "get-url", "origin"])
+        git_check = run_tool_check(["git", "-C", str(MLC_CLI_PATH), "remote", "get-url", "origin"])
         checks["repo"]["origin"] = git_check.get("output", "")
 
     # ── Derive overall status ─────────────────────────────────────────────────
-    # "critical" tools — without these the build cannot start at all
     critical_ok = checks["go"]["available"] and checks["conda"]["available"]
     gpu_ok = checks["nvidia_smi"]["available"] and checks["nvcc"]["available"]
 
     if repo_exists and critical_ok:
         overall = "ok"
     elif critical_ok:
-        # repo missing is a warning, not a hard error (it can be cloned on demand)
         overall = "warning"
     else:
         overall = "error"
@@ -436,183 +548,64 @@ def setup_check():
         )
 
     return {
-        # kept for backward compat with test_pipeline.py
         "repo_exists": repo_exists,
-        # new structured output
         "status":   overall,
         "checks":   checks,
         "warnings": warnings,
-    }
-
-@app.post("/ensure-repo-exists")
-def ensure_repo_exists():
-    # ── 1. Restore tracked source changes in managed repo, keep untracked files ──
-    dirty = get_git_dirty_state(MLC_CLI_PATH)
-    if dirty["exists"] and dirty["tracked_dirty"]:
-        cleanup = restore_tracked_changes(MLC_CLI_PATH)
-        if not cleanup["ok"]:
-            detail = cleanup["error"] or "failed to restore tracked changes"
-            return {
-                "status": "error",
-                "message": (
-                    f"Managed Bryan repo at {MLC_CLI_PATH} has tracked source modifications and cleanup failed. "
-                    "Verification and repair/re-alignment are unsafe until tracked code is clean. "
-                    f"Details: {detail}"
-                ),
-                "path": str(MLC_CLI_PATH),
-                "action": "tracked-cleanup-failed",
-                "tracked_changes": dirty["tracked_changes"],
-                "dirty_error": dirty["error"],
+        "wrapper_info": {
+            "mlc_cli_path": str(MLC_CLI_PATH),
+            "baked_mlc_cli_path": str(BAKED_MLC_CLI_PATH),
+            "baked_ref": read_text_file(Path("/opt/mlc-cli-ref.txt")),
+            "baked_actual_head": baked_head,
+            "workspace_head": workspace_head,
+            "workspace_matches_baked": baked_head == workspace_head if baked_head and workspace_head else None,
+            "python_runtime_version": py_version,
+            "expected_python_version": expected_py,
+            "python_match": py_match,
+            "mlc_llm_importable": mlc_import,
+            "tvm_importable": tvm_import,
+            "artifact_dirs_present": {
+                "models": (MLC_CLI_PATH / "models").exists(),
+                "dist": (MLC_CLI_PATH / "dist").exists(),
+                "wheels": (MLC_CLI_PATH / "wheels").exists(),
+                "mlc-llm": (MLC_CLI_PATH / "mlc-llm").exists(),
+                "tvm": (MLC_CLI_PATH / "tvm").exists(),
             }
-        print(
-            "[INFO] Managed repo was dirty and was automatically restored to the current checked-out commit "
-            "before alignment. Artifacts, downloaded files, and cache were not affected."
-        )
-
-    # ── 2. Determine local alignment ─────────────────────────────────────────
-    # Path inside container for metadata
-    upstream_meta = Path("/app/.upstream-sha.json")
-    # In this repair-oriented flow, we attempt self-recovery of metadata if missing
-    align = get_repo_alignment(MLC_CLI_PATH, upstream_meta, auto_restore=True)
-
-    pinned_sha = align["pinned_sha"]
-    current_sha = align["current_sha"]
-
-    # ── 3. Handle Repo Exists: Ensure Alignment ─────────────────────────────
-    if align["exists"]:
-        # If we have a pin and it doesn't match, re-align
-        # We re-align if relation is behind, ahead, or diverged.
-        # Basically anything other than "match" (or "unknown" if pinning is disabled)
-        if align["relation"] != "match" and pinned_sha:
-            try:
-                print(f"[INFO] mlc-cli exists ({align['relation']}), but pinned is {pinned_sha[:12]}. Re-aligning...")
-                run_git(["fetch", "origin"], cwd=MLC_CLI_PATH)
-                run_git(["checkout", pinned_sha], cwd=MLC_CLI_PATH)
-                return {
-                    "status": "ok",
-                    "message": f"mlc-cli re-aligned (was {align['relation']}) to pinned SHA {pinned_sha[:12]}",
-                    "path": str(MLC_CLI_PATH),
-                    "pinned_sha": pinned_sha,
-                    "previous_sha": current_sha,
-                    "action": "re-aligned",
-                }
-            except subprocess.CalledProcessError as exc:
-                return {
-                    "status": "error",
-                    "message": f"mlc-cli exists ({align['relation']}) but failed to re-align",
-                    "path": str(MLC_CLI_PATH),
-                    "stderr": exc.stderr.strip(),
-                }
-
-        return {
-            "status": "ok",
-            "message": "mlc-cli already exists and is aligned" if pinned_sha else "mlc-cli exists (no pinning active)",
-            "path": str(MLC_CLI_PATH),
-            "pinned_sha": pinned_sha,
-            "current_sha": current_sha,
-            "action": "already-aligned" if pinned_sha else "none",
         }
-
-    # ── 3. Handle Repo Missing: Clone + Pin ──────────────────────────────
-    print(f"[INFO] Cloning {MLC_CLI_URL} into {MLC_CLI_PATH}...")
-    try:
-        run_git(["clone", MLC_CLI_URL, str(MLC_CLI_PATH)])
-
-        # Pin to the approved SHA so fresh clones use the tested version
-        if pinned_sha:
-            print(f"[INFO] Checking out pinned SHA {pinned_sha[:12]}...")
-            run_git(["-C", str(MLC_CLI_PATH), "checkout", pinned_sha])
-
-        return {
-            "status": "ok",
-            "message": f"mlc-cli cloned and pinned to {pinned_sha[:12]}" if pinned_sha else "mlc-cli cloned (HEAD)",
-            "path": str(MLC_CLI_PATH),
-            "pinned_sha": pinned_sha,
-            "action": "cloned",
-        }
-    except subprocess.CalledProcessError as exc:
-        return {
-            "status": "error",
-            "message": "failed to clone mlc-cli",
-            "path": str(MLC_CLI_PATH),
-            "stderr": exc.stderr.strip(),
-        }
+    }
 
 
 @app.get("/repo-status")
 def repo_status():
-    """Check both the git dirty state and the alignment with pinned upstream SHA."""
-    # ── 1. Alignment check (local-only foundation) ──────────────────────────
-    upstream_meta = Path("/app/.upstream-sha.json")
-    align = get_repo_alignment(MLC_CLI_PATH, upstream_meta)
-
-    # ── 2. Git status check (dirtyness) ──────────────────────────────────────
-    is_clean = True
-    git_status_msg = "mlc-cli repo not found"
-    changes = []
-
-    if align["exists"]:
-        result = run_command(["git", "status", "--porcelain"], cwd=MLC_CLI_PATH)
-        if result.returncode == 0:
-            status_output = result.stdout.strip()
-            is_clean = len(status_output) == 0
-            git_status_msg = "Repository is clean" if is_clean else "Repository has uncommitted changes"
-            changes = status_output.split("\n") if status_output else []
-        else:
-            git_status_msg = f"failed to check git status: {result.stderr.strip()}"
-            is_clean = False
-
-    # ── 3. Alignment human messaging ─────────────────────────────────────────
-    rel = align["relation"]
-    pinned = align["pinned_sha"]
-    current = align["current_sha"]
-
-    if rel == "match":
-        align_msg = f"Aligned with pinned SHA {pinned[:12]}"
-    elif rel == "ahead":
-        align_msg = f"Ahead of pinned SHA (pinned: {pinned[:12]}, local: {current[:12]})"
-    elif rel == "behind":
-        align_msg = f"Behind pinned SHA (pinned: {pinned[:12]}, local: {current[:12]})"
-    elif rel == "diverged":
-        align_msg = f"Diverged from pinned SHA {pinned[:12]}"
-    elif rel == "missing":
-        align_msg = "Repository missing"
-    elif rel == "unpinned":
-        align_msg = "No pinning active"
-    else:
-        align_msg = "Alignment unknown"
-
-    # ── 4. Derive overall health status ──────────────────────────────────────
-    if not align["exists"]:
-        status = "missing"
-    elif rel == "unknown":
-        status = "unknown"
-    elif is_clean and rel in ("match", "unpinned"):
-        status = "healthy"
-    else:
-        status = "degraded"
-
-    # ── 5. Tighten repair_possible ───────────────────────────────────────────
-    # A repair/re-alignment is meaningful if we have a target pinned SHA
-    # and we are not already matched.
-    repair_possible = pinned is not None and rel in ("ahead", "behind", "diverged", "missing", "unpinned")
+    """Read-only endpoint to check baked vs workspace status."""
+    baked_head = git_head(BAKED_MLC_CLI_PATH)
+    workspace_head = git_head(MLC_CLI_PATH)
+    
+    matches = None
+    if baked_head and workspace_head:
+        matches = baked_head == workspace_head
 
     return {
-        "status": status,
-        "is_clean": is_clean if align["exists"] else None,
-        "message": f"{git_status_msg}. {align_msg}.",
-        "alignment": {
-            "pinned_sha": pinned,
-            "current_sha": current,
-            "relation": rel,
-            "repair_possible": repair_possible,
-            "message": align_msg,
+        "source_management": "baked-image",
+        "mlc_cli_path": str(MLC_CLI_PATH),
+        "baked_mlc_cli_path": str(BAKED_MLC_CLI_PATH),
+        "baked_ref_file": read_text_file(Path("/opt/mlc-cli-ref.txt")),
+        "baked_repo_file": read_text_file(Path("/opt/mlc-cli-repo.txt")),
+        "baked_actual_head": baked_head,
+        "workspace_head": workspace_head,
+        "workspace_matches_baked": matches,
+        "artifact_dirs": {
+            "models": (MLC_CLI_PATH / "models").exists(),
+            "dist": (MLC_CLI_PATH / "dist").exists(),
+            "wheels": (MLC_CLI_PATH / "wheels").exists(),
+            "mlc-llm": (MLC_CLI_PATH / "mlc-llm").exists(),
+            "tvm": (MLC_CLI_PATH / "tvm").exists(),
         },
-        "changes": changes,
+        "dev_mode": False
     }
 
 
-# ── Build endpoint ─────────────────────────────────────────────────────────────
+# ── Build endpoint ────────────────────────────────────────────────────────────
 
 @app.post("/build")
 async def build(req: BuildRequest):
@@ -633,7 +626,7 @@ async def build(req: BuildRequest):
     """
     if not MLC_CLI_PATH.exists():
         async def error_stream():
-            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+            yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     cmd = build_mlc_cli_command(req)
@@ -648,7 +641,7 @@ async def build(req: BuildRequest):
     )
 
 
-# ── Quantize endpoint ────────────────────────────────────────────────────────────────
+# ── Quantize endpoint ─────────────────────────────────────────────────
 
 @app.post("/quantize")
 @app.post("/convert", include_in_schema=False)
@@ -664,11 +657,15 @@ async def quantize_model(req: QuantizeRequest):
     If ``output`` is omitted, mlc-cli derives a default path of the form
     ``dist/<model_basename>-<quant>-MLC``.
 
-    Example — quantize a locally-cloned Llama-3 8B model::
+    ``conv_template`` defaults to ``"auto"``, which automatically selects
+    the right MLC conversation template based on the model name.  Pass an
+    explicit template name if you need to override the inferred value.
 
-        curl -N -X POST http://localhost:8000/quantize \\
-             -H 'Content-Type: application/json' \\
-             -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+    Example — quantize TinyLlama (conv_template auto-inferred)::
+
+        curl -N -X POST http://localhost:8000/quantize \\\
+             -H 'Content-Type: application/json' \\\
+             -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
 
     Each SSE line is prefixed with ``data: ``.
     The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
@@ -676,8 +673,18 @@ async def quantize_model(req: QuantizeRequest):
     """
     if not MLC_CLI_PATH.exists():
         async def error_stream():
-            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+            yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    # ── Resolve conv_template before any I/O ────────────────────────────────
+    try:
+        resolved_template, template_messages = prepare_conv_template_for_quantize(
+            model=req.model,
+            requested_template=req.conv_template,
+            mlc_cli_path=MLC_CLI_PATH,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # ── Normalize model path: resolve relative paths against known roots ─────
     model_path = Path(req.model)
@@ -699,12 +706,19 @@ async def quantize_model(req: QuantizeRequest):
             )
         return StreamingResponse(model_error_stream(), media_type="text/event-stream")
 
-    req = req.model_copy(update={"model": str(resolved_model)})
+    req = req.model_copy(update={"model": str(resolved_model), "conv_template": resolved_template})
 
     cmd = build_quantize_command(req)
 
+    async def _quantize_stream():
+        # Emit conv_template info/warnings before mlc-cli output.
+        for msg in template_messages:
+            yield msg
+        async for chunk in stream_subprocess(cmd, cwd=MLC_CLI_PATH):
+            yield chunk
+
     return StreamingResponse(
-        stream_subprocess(cmd, cwd=MLC_CLI_PATH),
+        _quantize_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -713,7 +727,32 @@ async def quantize_model(req: QuantizeRequest):
     )
 
 
-# ── Compile endpoint ────────────────────────────────────────────────────────────────
+# ── Conv-templates endpoint ───────────────────────────────────────────────────
+
+@app.get("/conv-templates")
+def list_conv_templates():
+    """Return the set of supported conv_template values for POST /quantize.
+
+    The list is loaded from the pinned mlc-llm source bundled in the Docker
+    image (``mlc-llm/python/mlc_llm/interface/gen_config.py``) and falls back
+    to a hardcoded list if the source is not available.
+
+    Example::
+
+        curl http://localhost:8000/conv-templates
+    """
+    supported = get_supported_conv_templates(MLC_CLI_PATH)
+    return {
+        "templates": sorted(supported),
+        "default": "auto",
+        "note": (
+            "Use \"auto\" (the default) to let the API infer the template from "
+            "the model name. Pass an explicit name only to override inference."
+        ),
+    }
+
+
+
 
 @app.post("/compile")
 async def compile_model(req: CompileRequest):
@@ -734,7 +773,7 @@ async def compile_model(req: CompileRequest):
     """
     if not MLC_CLI_PATH.exists():
         async def error_stream():
-            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+            yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     # ── Normalize model path: resolve relative paths against known roots ─────
@@ -800,7 +839,7 @@ async def run_model(req: RunRequest):
     """
     if not MLC_CLI_PATH.exists():
         async def error_stream():
-            yield "data: [ERROR] mlc-cli repo not found. Call /ensure-repo-exists first.\n\n"
+            yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     # ── Normalize model_lib: resolve relative paths against the workspace ─────

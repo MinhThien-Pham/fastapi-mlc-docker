@@ -405,7 +405,7 @@ No model download, quantization, or compilation should be required unless the ex
 
 ## Update Workflow: `mlc-cli`
 
-`fastapi-mlc-docker` should expose the pinned `mlc-cli` version through build configuration:
+`fastapi-mlc-docker` should expose the pinned `mlc-cli` version through `docker/mlc-cli.lock`:
 
 ```text
 MLC_CLI_REPO=https://github.com/MinhThien-Pham/mlc-cli.git
@@ -415,7 +415,7 @@ MLC_CLI_REF=<full 40-character commit SHA>
 When updating `mlc-cli`:
 
 ```text
-update MLC_CLI_REF
+update MLC_CLI_REF in docker/mlc-cli.lock
 docker compose build web
 docker compose up -d web
 ```

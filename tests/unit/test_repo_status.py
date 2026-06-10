@@ -1,122 +1,79 @@
 """
 tests/unit/test_repo_status.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Tests for the GET /repo-status endpoint.
+Tests for the GET /repo-status endpoint in the baked mlc-cli architecture.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-import pytest
+from unittest.mock import patch
 
-def _proc(stdout: str = "", returncode: int = 0) -> MagicMock:
-    """Build a fake subprocess.CompletedProcess-like mock."""
-    m = MagicMock()
-    m.stdout = stdout
-    m.stderr = ""
-    m.returncode = returncode
-    return m
 
-class TestRepoStatus:
-    
-    @patch("app.main.run_command")
-    @patch("app.main.get_repo_alignment")
-    def test_repo_missing(self, mock_align, mock_run, client):
-        """When repo is missing, status is 'missing'."""
-        mock_align.return_value = {
-            "exists": False,
-            "pinned_sha": "pinned123",
-            "current_sha": None,
-            "relation": "missing"
-        }
+def test_repo_status_reports_baked_and_workspace_state(client, monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    baked = tmp_path / "baked"
+    workspace.mkdir()
+    baked.mkdir()
+
+    for name in ["models", "dist", "wheels", "mlc-llm", "tvm"]:
+        (workspace / name).mkdir()
+
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+    monkeypatch.setattr("app.main.BAKED_MLC_CLI_PATH", baked)
+
+    def fake_git_head(path: Path):
+        if path == baked:
+            return "sha-baked"
+        if path == workspace:
+            return "sha-baked"
+        return None
+
+    def fake_read_text_file(path: Path):
+        if str(path) == "/opt/mlc-cli-ref.txt":
+            return "sha-baked"
+        if str(path) == "/opt/mlc-cli-repo.txt":
+            return "https://github.com/MinhThien-Pham/mlc-cli.git"
+        return None
+
+    with patch("app.main.git_head", side_effect=fake_git_head), \
+         patch("app.main.read_text_file", side_effect=fake_read_text_file):
         resp = client.get("/repo-status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "missing"
-        assert data["is_clean"] is None
-        assert "Repository missing" in data["message"]
-        assert data["alignment"]["relation"] == "missing"
-        assert data["alignment"]["repair_possible"] is True
 
-    @patch("app.main.run_command")
-    @patch("app.main.get_repo_alignment")
-    def test_repo_aligned_and_clean(self, mock_align, mock_run, client):
-        """Repo exists, matches pinned SHA, and has no local changes -> healthy."""
-        mock_align.return_value = {
-            "exists": True,
-            "pinned_sha": "sha123",
-            "current_sha": "sha123",
-            "relation": "match"
-        }
-        mock_run.return_value = _proc(stdout="") # git status clean
-        
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["source_management"] == "baked-image"
+    assert data["mlc_cli_path"] == str(workspace)
+    assert data["baked_mlc_cli_path"] == str(baked)
+    assert data["baked_ref_file"] == "sha-baked"
+    assert data["baked_repo_file"] == "https://github.com/MinhThien-Pham/mlc-cli.git"
+    assert data["baked_actual_head"] == "sha-baked"
+    assert data["workspace_head"] == "sha-baked"
+    assert data["workspace_matches_baked"] is True
+    assert data["dev_mode"] is False
+
+    for name in ["models", "dist", "wheels", "mlc-llm", "tvm"]:
+        assert data["artifact_dirs"][name] is True
+
+
+def test_repo_status_handles_missing_git_heads(client, monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    baked = tmp_path / "baked"
+
+    monkeypatch.setattr("app.main.MLC_CLI_PATH", workspace)
+    monkeypatch.setattr("app.main.BAKED_MLC_CLI_PATH", baked)
+
+    with patch("app.main.git_head", return_value=None), \
+         patch("app.main.read_text_file", return_value=None):
         resp = client.get("/repo-status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "healthy"
-        assert data["is_clean"] is True
-        assert data["alignment"]["relation"] == "match"
-        assert data["alignment"]["repair_possible"] is False  # Already matched
 
-    @patch("app.main.run_command")
-    @patch("app.main.get_repo_alignment")
-    def test_repo_behind_and_dirty(self, mock_align, mock_run, client):
-        """Repo exists, is behind pinned SHA, and has uncommitted changes -> degraded."""
-        mock_align.return_value = {
-            "exists": True,
-            "pinned_sha": "new_sha",
-            "current_sha": "old_sha",
-            "relation": "behind"
-        }
-        mock_run.return_value = _proc(stdout=" M app/main.py") 
-        
-        resp = client.get("/repo-status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "degraded"
-        assert data["is_clean"] is False
-        assert data["alignment"]["relation"] == "behind"
-        assert data["alignment"]["repair_possible"] is True
-        assert data["changes"] == ["M app/main.py"]
+    assert resp.status_code == 200
+    data = resp.json()
 
-    @patch("app.main.run_command")
-    @patch("app.main.get_repo_alignment")
-    def test_repo_diverged(self, mock_align, mock_run, client):
-        """Repo has diverged from the pinned SHA -> degraded."""
-        mock_align.return_value = {
-            "exists": True,
-            "pinned_sha": "sha_a",
-            "current_sha": "sha_b",
-            "relation": "diverged"
-        }
-        mock_run.return_value = _proc(stdout="") 
-        
-        resp = client.get("/repo-status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "degraded"
-        assert data["alignment"]["relation"] == "diverged"
-        assert data["alignment"]["repair_possible"] is True
+    assert data["source_management"] == "baked-image"
+    assert data["baked_actual_head"] is None
+    assert data["workspace_head"] is None
+    assert data["workspace_matches_baked"] is None
 
-    @patch("app.main.run_command")
-    @patch("app.main.get_repo_alignment")
-    def test_no_pin_active(self, mock_align, mock_run, client):
-        """No pinning metadata exists -> healthy (but unpinned)."""
-        mock_align.return_value = {
-            "exists": True,
-            "pinned_sha": None,
-            "current_sha": "some_sha",
-            "relation": "unpinned"
-        }
-        mock_run.return_value = _proc(stdout="")
-        
-        resp = client.get("/repo-status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "healthy"
-        assert data["alignment"]["pinned_sha"] is None
-        assert data["alignment"]["relation"] == "unpinned"
-        assert data["alignment"]["repair_possible"] is False
-        assert "No pinning active" in data["message"]
-
+    for name in ["models", "dist", "wheels", "mlc-llm", "tvm"]:
+        assert data["artifact_dirs"][name] is False

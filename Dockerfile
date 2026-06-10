@@ -10,13 +10,16 @@ ENV PYTHONUNBUFFERED=1
 ENV CONDA_DIR=/opt/conda
 ENV CLI_VENV=mlc-cli-venv
 ENV GOTOOLCHAIN=local
+
+# Runtime environment variables for baked mlc-cli workspace
+ENV MLC_CLI_PATH=/workspace/mlc-cli
+ENV BAKED_MLC_CLI_PATH=/opt/mlc-cli
+ENV TVM_HOME=/workspace/mlc-cli/tvm
+ENV PYTHONPATH=/workspace/mlc-cli/tvm/python
+ENV LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib
+
 # conda first so conda-managed python/cmake/rust take precedence
 ENV PATH="${CONDA_DIR}/bin:/usr/local/go/bin:${PATH}"
-
-# Runtime environment variables for MLC/TVM inside FastAPI
-ENV TVM_HOME=/workspace/mlc-cli/tvm
-ENV PYTHONPATH=/workspace/mlc-cli/tvm/python:${PYTHONPATH:-}
-ENV LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib:${LD_LIBRARY_PATH:-}
 
 # Build config — overridable at runtime via docker-compose / docker run -e
 ENV BUILD_ACTION=full
@@ -39,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     git-lfs \
+    rsync \
     libxml2-dev \
     zlib1g-dev \
     && git lfs install \
@@ -65,11 +69,31 @@ RUN wget -q "https://repo.anaconda.com/miniconda/Miniconda3-${CONDA_VERSION}-Lin
 RUN conda init bash \
     && echo "conda activate base" >> /root/.bashrc
 
-# ── Python venv for FastAPI app ───────────────────────────────────────────────
-# Create the conda environment that mlc-cli expects, so FastAPI runs in it too.
-RUN conda create -y -n ${CLI_VENV} python=3.13 pip cmake rust psutil transformers
+# ── Baked mlc-cli source ──────────────────────────────────────────────────────
+COPY docker/mlc-cli.lock /tmp/mlc-cli.lock
+RUN . /tmp/mlc-cli.lock \
+    && git clone "${MLC_CLI_REPO}" /opt/mlc-cli \
+    && git -C /opt/mlc-cli checkout "${MLC_CLI_REF}" \
+    && git -C /opt/mlc-cli rev-parse HEAD > /opt/mlc-cli-ref.txt \
+    && echo "${MLC_CLI_REPO}" > /opt/mlc-cli-repo.txt \
+    && test -f /opt/mlc-cli/scripts/config/versions.sh
 
-# ── Workspace (mlc-cli repo lives here via Docker volume) ─────────────────────
+# ── Python venv for FastAPI + mlc-cli ─────────────────────────────────────────
+# Create the conda environment from mlc-cli's version source of truth.
+RUN bash -lc '\
+    set -euo pipefail; \
+    source /opt/mlc-cli/scripts/config/versions.sh; \
+    conda create -y -n "${CLI_VENV}" -c "${CONDA_CHANNEL}" \
+    "python=${PYTHON_VERSION}" \
+    "cmake>=${CMAKE_MIN_VERSION}" \
+    rust \
+    psutil \
+    transformers \
+    pip; \
+    conda clean -afy; \
+    conda run -n ${CLI_VENV} python --version \
+'
+# ── Workspace volume for mlc-cli runtime artifacts ────────────────────────────
 RUN mkdir -p /workspace
 
 # ── Python dependencies ───────────────────────────────────────────────────────
@@ -77,9 +101,13 @@ COPY requirements.txt .
 RUN conda run -n ${CLI_VENV} pip install --no-cache-dir --upgrade pip \
     && conda run -n ${CLI_VENV} pip install --no-cache-dir -r requirements.txt
 
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+COPY docker/entrypoint.sh /usr/local/bin/fastapi-mlc-entrypoint
+RUN chmod +x /usr/local/bin/fastapi-mlc-entrypoint
+
 # ── App source ────────────────────────────────────────────────────────────────
 COPY . .
 
 EXPOSE 8000
 
-CMD ["conda", "run", "--no-capture-output", "-n", "mlc-cli-venv", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/usr/local/bin/fastapi-mlc-entrypoint"]

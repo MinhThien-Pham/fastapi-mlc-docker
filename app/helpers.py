@@ -8,16 +8,20 @@ All functions here are side-effect-free or have their side effects
 
 Functions
 ---------
-detect_known_failure   – detect known build-log failure signatures
-run_tool_check         – thin wrapper around subprocess for tool availability
-get_repo_alignment     – local-only check of current vs pinned SHA
-build_mlc_cli_command  – construct ``go run . build`` argv list
-build_convert_command  – construct ``go run . quantize`` argv list
+detect_known_failure         – detect known build-log failure signatures
+run_tool_check               – thin wrapper around subprocess for tool availability
+build_mlc_cli_command        – construct ``go run . build`` argv list
+build_convert_command        – construct ``go run . quantize`` argv list
+get_supported_conv_templates – load the CONV_TEMPLATES set from pinned mlc-llm source
+infer_conv_template_for_model – heuristic model-name → template name mapping
+prepare_conv_template_for_quantize – resolve + warn before /quantize calls mlc-cli
 """
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -96,263 +100,6 @@ def run_tool_check(command: list[str]) -> dict[str, Any]:
         return {"available": False, "output": "command not found", "returncode": -1}
     except subprocess.TimeoutExpired:
         return {"available": False, "output": "timed out", "returncode": -1}
-
-
-# ── Git working-tree state ───────────────────────────────────────────────────
-
-def get_git_dirty_state(repo_path: Path) -> dict[str, Any]:
-    """Inspect *repo_path* and split tracked dirty state from untracked files.
-
-    For managed Bryan repo policy, only tracked-file modifications are treated
-    as unsafe source-code drift. Untracked artifacts/caches are reported, but
-    are not considered tracked dirty state.
-    """
-    result: dict[str, Any] = {
-        "exists": repo_path.exists(),
-        "tracked_dirty": False,
-        "tracked_changes": [],
-        "untracked_files": [],
-        "error": None,
-    }
-
-    if not result["exists"]:
-        return result
-
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    if status.returncode != 0:
-        result["tracked_dirty"] = True
-        result["error"] = status.stderr.strip() or status.stdout.strip() or "git status failed"
-        return result
-
-    tracked: list[str] = []
-    untracked: list[str] = []
-    for raw in status.stdout.splitlines():
-        line = raw.strip("\n")
-        if not line:
-            continue
-        if line.startswith("?? "):
-            untracked.append(line[3:])
-        elif line.startswith("!! "):
-            # Ignored files are irrelevant for managed source-code cleanliness.
-            continue
-        else:
-            tracked.append(line)
-
-    result["tracked_changes"] = tracked
-    result["untracked_files"] = untracked
-    result["tracked_dirty"] = bool(tracked)
-    return result
-
-
-def restore_tracked_changes(repo_path: Path) -> dict[str, Any]:
-    """Restore tracked files in *repo_path* to the current checked-out commit.
-
-    This intentionally does not delete untracked files and does not change the
-    checked-out commit. It only resets tracked file content/index state.
-    """
-    before = get_git_dirty_state(repo_path)
-    result: dict[str, Any] = {
-        "ok": True,
-        "restored": False,
-        "before": before,
-        "after": before,
-        "error": None,
-    }
-
-    if not before["exists"]:
-        return result
-
-    if before["error"]:
-        result["ok"] = False
-        result["error"] = before["error"]
-        return result
-
-    if not before["tracked_dirty"]:
-        return result
-
-    restore = subprocess.run(
-        ["git", "restore", "--staged", "--worktree", "--", "."],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    if restore.returncode != 0:
-        result["ok"] = False
-        result["error"] = restore.stderr.strip() or restore.stdout.strip() or "git restore failed"
-        return result
-
-    after = get_git_dirty_state(repo_path)
-    result["after"] = after
-    result["restored"] = True
-    if after["error"]:
-        result["ok"] = False
-        result["error"] = after["error"]
-    elif after["tracked_dirty"]:
-        result["ok"] = False
-        sample = ", ".join(after["tracked_changes"][:5])
-        result["error"] = f"tracked changes remain after restore: {sample}"
-
-    return result
-
-
-# ── Repo Alignment logic ──────────────────────────────────────────────────────
-
-def try_restore_metadata(metadata_path: Path) -> bool:
-    """Attempt to restore the metadata file from the local git repo if missing or malformed.
-
-    Returns True if the file exists and is valid JSON after the attempt.
-    """
-    needs_restore = False
-
-    if not metadata_path.is_file():
-        needs_restore = True
-    else:
-        try:
-            json.loads(metadata_path.read_text())
-        except (json.JSONDecodeError, IOError, Exception):
-            needs_restore = True
-
-    if needs_restore:
-        try:
-            # Try to restore from git.
-            subprocess.run(
-                ["git", "checkout", "--", metadata_path.name],
-                cwd=metadata_path.parent,
-                capture_output=True,
-                check=True
-            )
-        except Exception:
-            pass
-
-    # Final validation
-    if not metadata_path.is_file():
-        return False
-    try:
-        json.loads(metadata_path.read_text())
-        return True
-    except Exception:
-        return False
-
-
-def get_repo_alignment(repo_path: Path, metadata_path: Path, auto_restore: bool = False) -> dict[str, Any]:
-    """Determine the relationship between the local repo and the pinned metadata.
-
-    This is a local-only inspection (no network fetch).
-
-    Returns
-    -------
-    dict with keys:
-        exists (bool)      – True if repo_path exists
-        pinned_sha (str)   – SHA from metadata_path (or None)
-        current_sha (str)  – HEAD SHA from repo (or None)
-        relation (str)     – "match" | "ahead" | "behind" | "diverged" | "missing" | "unpinned" | "unknown"
-    """
-    res: dict[str, Any] = {
-        "exists": repo_path.exists(),
-        "pinned_sha": None,
-        "current_sha": None,
-        "relation": "unknown",
-    }
-
-    # 1. Read pinned SHA from metadata (with optional self-recovery)
-    if auto_restore:
-        try_restore_metadata(metadata_path)
-
-    if metadata_path.is_file():
-        try:
-            res["pinned_sha"] = json.loads(metadata_path.read_text()).get("pinned_sha")
-        except Exception:
-            # Exists but unreadable: if we already tried restore and failed, this is unknown
-            pass
-
-    if not res["exists"]:
-        res["relation"] = "missing"
-        return res
-
-    # 2. Get current HEAD SHA
-    r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    )
-    if r.returncode != 0:
-        # Not a git repo or other git error: this is a true unknown
-        res["relation"] = "unknown"
-        return res
-    res["current_sha"] = r.stdout.strip()
-
-    # 3. Determine alignment relation
-    pinned = res["pinned_sha"]
-    current = res["current_sha"]
-
-    # If we have a repo but no pinned SHA to compare against
-    if not pinned:
-        res["relation"] = "unpinned"
-        return res
-
-    if not current:
-        res["relation"] = "unknown"
-        return res
-
-    if pinned == current:
-        res["relation"] = "match"
-        return res
-
-    # 4. Check ancestry
-    # Is pinned an ancestor of current? (ahead)
-    r = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", pinned, current],
-        cwd=repo_path,
-        capture_output=True
-    )
-    if r.returncode == 0:
-        res["relation"] = "ahead"
-        return res
-
-    # Is current an ancestor of pinned? (behind)
-    r = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", current, pinned],
-        cwd=repo_path,
-        capture_output=True
-    )
-    if r.returncode == 0:
-        res["relation"] = "behind"
-        return res
-
-    # Neither is an ancestor of the other
-    res["relation"] = "diverged"
-    return res
-
-
-def get_startup_alignment_message(align: dict[str, Any]) -> str:
-    """Translate repo alignment into a clear human-readable startup log message."""
-    rel = align["relation"]
-    pinned = align["pinned_sha"]
-    current = align["current_sha"]
-
-    if rel == "match":
-        return f"Bryan mlc-cli repo is aligned with pinned SHA {pinned[:12]}"
-    elif rel == "ahead":
-        return (f"Bryan mlc-cli repo is AHEAD of pinned SHA (pinned: {pinned[:12]}, local: {current[:12]}). "
-                "Recommend running 'verify_upstream.py' if this was intentional.")
-    elif rel == "behind":
-        return (f"Bryan mlc-cli repo is BEHIND pinned SHA {pinned[:12]} (local: {current[:12]}). "
-                "Use POST /ensure-repo-exists to re-align.")
-    elif rel == "diverged":
-        return (f"Bryan mlc-cli repo has DIVERGED from pinned SHA {pinned[:12]}. "
-                "Recommend manual inspection or repair via POST /ensure-repo-exists.")
-    elif rel == "missing":
-        return "Bryan mlc-cli repo is MISSING. Use POST /ensure-repo-exists to clone and align it."
-    elif rel == "unpinned":
-        return "Bryan mlc-cli repo exists but no pinning metadata is active."
-    else:
-        return "Bryan mlc-cli repo status is UNKNOWN (failed to inspect Git state)."
 
 
 # ── Build command construction ────────────────────────────────────────────────
@@ -573,3 +320,345 @@ def discover_artifacts(base_path: Path) -> list[dict]:
                 pass
 
     return artifacts
+
+
+def resolve_chat_artifacts(
+    mlc_cli_path: Path,
+    model: str,
+    model_name: str,
+    quant: str,
+    device: str,
+) -> tuple[str, str]:
+    """Resolve model shorthand to explicit model and model_lib paths.
+    
+    Returns:
+        (resolved_model_path, resolved_model_lib_path)
+    
+    Raises:
+        ValueError with clear error message if resolution fails.
+    """
+    target = model_name if model_name else model
+    if not target:
+        raise ValueError("Must provide 'model' or 'model_name'.")
+
+    dist_dir = mlc_cli_path / "dist"
+    base_device = device.split(":")[0] if ":" in device else device
+
+    candidate_dirs: list[Path] = []
+    
+    # 1. Check if target is a direct path to an existing artifact directory
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        target_path = mlc_cli_path / target
+        
+    if target_path.is_dir() and target_path.name.endswith("-MLC"):
+        candidate_dirs.append(target_path)
+    else:
+        # 2. Fallback to shorthand / HF ID search
+        search_term = target
+        if "/" in search_term and not search_term.startswith("dist/"):
+            search_term = search_term.split("/")[-1]
+
+        if search_term.endswith("-MLC"):
+            exact_dir = dist_dir / search_term
+            if exact_dir.is_dir():
+                candidate_dirs.append(exact_dir)
+                
+        if not candidate_dirs and dist_dir.is_dir():
+            for d in dist_dir.iterdir():
+                if d.is_dir() and d.name.startswith(search_term) and d.name.endswith("-MLC"):
+                    candidate_dirs.append(d)
+                    
+    candidate_dirs.sort()
+                
+    if not candidate_dirs:
+        raise ValueError(f"No compiled MLC artifact found for '{target}'. Run /quantize and /compile first, then try /chat/load again.")
+
+    if len(candidate_dirs) > 1:
+        quant_matches = [d for d in candidate_dirs if f"-{quant}-" in d.name or d.name.endswith(f"-{quant}-MLC")]
+        if quant_matches:
+            candidate_dirs = quant_matches
+            
+    if len(candidate_dirs) > 1:
+        candidates_str = ", ".join(d.name for d in candidate_dirs)
+        raise ValueError(f"Multiple artifact candidates found for '{target}': {candidates_str}. Please specify 'model_name' or 'quant' to disambiguate.")
+
+    resolved_model_dir = candidate_dirs[0]
+    
+    libs_dir = mlc_cli_path / "dist" / "libs"
+    lib_matches: list[Path] = []
+    if libs_dir.is_dir():
+        for ext in (".so", ".dylib"):
+            for candidate in libs_dir.glob(f"{resolved_model_dir.name}-*-{base_device}{ext}"):
+                lib_matches.append(candidate)
+    
+    lib_matches.sort()
+                
+    if not lib_matches:
+        raise ValueError(f"Found model artifact directory, but no compiled library was found. Run /compile first. (Expected lib under dist/libs/{resolved_model_dir.name}-*-{base_device}.so or .dylib)")
+        
+    if len(lib_matches) > 1:
+        quant_matches = [p for p in lib_matches if f"-{quant}-" in p.name]
+        if quant_matches:
+            lib_matches = quant_matches
+            
+    if len(lib_matches) > 1:
+        raise ValueError(f"Multiple compiled libraries found for '{resolved_model_dir.name}' and device '{base_device}'. Please specify 'quant' to disambiguate.")
+
+    return str(resolved_model_dir), str(lib_matches[0])
+
+
+# ── Conv-template helpers ─────────────────────────────────────────────────────
+
+# Fallback list derived from mlc-llm gen_config.py CONV_TEMPLATES set at the
+# pinned MLC_LLM_REF=2008fe8343e1f40ef89ee57b9287aebcf1b86c98.
+# Update when the pinned ref is bumped.
+_FALLBACK_CONV_TEMPLATES: frozenset[str] = frozenset({
+    "LM",
+    "aya-23",
+    "chatml",
+    "chatml_nosystem",
+    "codellama_completion",
+    "codellama_instruct",
+    "deepseek",
+    "deepseek_r1_llama",
+    "deepseek_r1_qwen",
+    "deepseek_v2",
+    "deepseek_v3",
+    "dolly",
+    "gemma_instruction",
+    "gemma3_instruction",
+    "glm",
+    "gorilla",
+    "gorilla-openfunctions-v2",
+    "gpt2",
+    "gpt_bigcode",
+    "hermes2_pro_llama3",
+    "hermes3_llama-3_1",
+    "llama-2",
+    "llama-3",
+    "llama-3_1",
+    "llama-4",
+    "llama_default",
+    "llava",
+    "llm-jp",
+    "ministral3",
+    "ministral3_reasoning",
+    "mistral_default",
+    "nemotron",
+    "neural_hermes_mistral",
+    "oasst",
+    "olmo",
+    "olmo2",
+    "open_hermes_mistral",
+    "orion",
+    "phi-2",
+    "phi-3",
+    "phi-3-vision",
+    "phi-4",
+    "qwen2",
+    "qwen3",
+    "qwen3_5",
+    "qwen3_5_nothink",
+    "redpajama_chat",
+    "rwkv_world",
+    "stablelm",
+    "stablelm-2",
+    "stablelm-3b",
+    "tinyllama_v1_0",
+    "wizard_coder_or_math",
+    "wizardlm_7b",
+})
+
+
+def get_supported_conv_templates(mlc_cli_path: Path) -> frozenset[str]:
+    """Return the set of supported conv_template names from the pinned runtime.
+
+    Preferred source: parse the CONV_TEMPLATES set from
+    ``<mlc_cli_path>/mlc-llm/python/mlc_llm/interface/gen_config.py``
+    using the ``ast`` module (no import of mlc_llm required).
+
+    Falls back to the hardcoded ``_FALLBACK_CONV_TEMPLATES`` set if the file
+    cannot be found or parsed.
+    """
+    gen_config_py = (
+        mlc_cli_path / "mlc-llm" / "python" / "mlc_llm" / "interface" / "gen_config.py"
+    )
+    if not gen_config_py.is_file():
+        return _FALLBACK_CONV_TEMPLATES
+
+    try:
+        source = gen_config_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(gen_config_py))
+    except (OSError, SyntaxError):
+        return _FALLBACK_CONV_TEMPLATES
+
+    for node in ast.walk(tree):
+        # Look for:  CONV_TEMPLATES = { ... }
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = node.targets
+        if len(targets) != 1:
+            continue
+        if not (isinstance(targets[0], ast.Name) and targets[0].id == "CONV_TEMPLATES"):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, (set, frozenset)):
+            return frozenset(str(v) for v in value)
+
+    return _FALLBACK_CONV_TEMPLATES
+
+
+# Models whose names match these patterns CANNOT be auto-inferred safely.
+# They appear to require custom (gpt-oss / harmony) templates that are not
+# registered in the current runtime.
+_UNSUPPORTED_AUTO_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\bgpt.?oss\b", re.IGNORECASE),
+    re.compile(r"\bharmon[yi]\b", re.IGNORECASE),
+]
+
+
+def infer_conv_template_for_model(
+    model: str,
+    supported_templates: frozenset[str],
+) -> str | None:
+    """Heuristically infer a supported conv_template from a model identifier.
+
+    Matches against the Hugging Face model ID or local path basename.
+    Checks that the inferred template actually exists in *supported_templates*.
+
+    Returns the template name if found, or ``None`` if no confident match.
+    """
+    # Normalise: use the basename of a HF ID or local path, lower-cased.
+    name = model.split("/")[-1].lower().replace("-", "_").replace(".", "_")
+
+    # Ordered: more-specific patterns first so they match before shorter ones.
+    _RULES: list[tuple[re.Pattern[str], str]] = [
+        # TinyLlama
+        (re.compile(r"tinyllama"),                         "tinyllama_v1_0"),
+        # Hermes variants (must come before plain llama)
+        (re.compile(r"hermes.*3.*llama.*3.*1|hermes.*3_1.*llama"), "hermes3_llama-3_1"),
+        (re.compile(r"hermes.*2.*llama.*3|hermes.*2.*pro.*llama"), "hermes2_pro_llama3"),
+        (re.compile(r"openhermes.*mistral|open_hermes.*mistral"), "open_hermes_mistral"),
+        (re.compile(r"neuralhermes.*mistral|neural_hermes.*mistral"), "neural_hermes_mistral"),
+        # Nemotron (must come before llama-3_1 since some Nemotron names include Llama-3.1)
+        (re.compile(r"nemotron"),                          "nemotron"),
+        # DeepSeek — most-specific first
+        (re.compile(r"deepseek.*r1.*llama"),               "deepseek_r1_llama"),
+        (re.compile(r"deepseek.*r1.*qwen"),                "deepseek_r1_qwen"),
+        (re.compile(r"deepseek.*v3"),                      "deepseek_v3"),
+        (re.compile(r"deepseek.*v2"),                      "deepseek_v2"),
+        (re.compile(r"deepseek"),                          "deepseek"),
+        # Llama family
+        (re.compile(r"llama.*4"),                          "llama-4"),
+        (re.compile(r"llama.*3.*1|llama.*3_1"),            "llama-3_1"),
+        (re.compile(r"llama.*3"),                          "llama-3"),
+        (re.compile(r"llama.*2"),                          "llama-2"),
+        # Mistral / Ministral
+        (re.compile(r"ministral.*3"),                      "ministral3"),
+        (re.compile(r"mistral|mixtral"),                   "mistral_default"),
+        # Phi — exact version digits. After normalisation, separators become "_".
+        # We match the version digit and ensure the NEXT character (if any) is not
+        # also a digit, so phi_4 does not accidentally match phi_40 or phi_3 match phi_4.
+        (re.compile(r"phi[_]*4(?:\D|$)"),                  "phi-4"),
+        (re.compile(r"phi[_]*3(?:\D|$)"),                  "phi-3"),
+        (re.compile(r"phi[_]*2(?:\D|$)"),                  "phi-2"),
+        # Gemma
+        (re.compile(r"gemma.*3|gemma3"),                   "gemma3_instruction"),
+        (re.compile(r"gemma"),                             "gemma_instruction"),
+        # Qwen — most-specific first
+        (re.compile(r"qwen.*3.*5|qwen3_5"),               "qwen3_5"),
+        (re.compile(r"qwen.*3"),                           "qwen3"),
+        (re.compile(r"qwen.*2.*5|qwen.*2"),               "qwen2"),
+    ]
+
+    for pattern, template in _RULES:
+        if pattern.search(name):
+            # Only return the template if the current runtime actually supports it.
+            if template in supported_templates:
+                return template
+    return None
+
+
+def prepare_conv_template_for_quantize(
+    model: str,
+    requested_template: str,
+    mlc_cli_path: Path,
+) -> tuple[str, list[str]]:
+    """Resolve the conv_template for a /quantize request.
+
+    Parameters
+    ----------
+    model:
+        The model identifier (HF ID or local path) from the request.
+    requested_template:
+        The ``conv_template`` field value from the request.
+        ``"auto"`` triggers inference; anything else is an explicit choice.
+    mlc_cli_path:
+        Path to the mlc-cli workspace (used to load the live template list).
+
+    Returns
+    -------
+    (resolved_template, messages)
+        ``resolved_template`` is the template string to pass to mlc-cli.
+        ``messages`` is a list of ``data: [INFO/WARNING] ...\\n\\n`` SSE lines
+        to emit *before* mlc-cli output.
+
+    Raises
+    ------
+    ValueError
+        Only in ``"auto"`` mode when no template can be safely inferred.
+    """
+    supported = get_supported_conv_templates(mlc_cli_path)
+    messages: list[str] = []
+
+    if requested_template == "auto":
+        # Block known-unsupported model families immediately.
+        model_lower = model.lower()
+        for pat in _UNSUPPORTED_AUTO_PATTERNS:
+            if pat.search(model_lower):
+                raise ValueError(
+                    f"Could not infer a supported conv_template for '{model}'. "
+                    "This model appears to require a custom template such as Harmony "
+                    "or gpt-oss, but the current runtime does not list harmony/gpt-oss "
+                    "as supported. Pass conv_template explicitly only if you intentionally "
+                    "want to experiment."
+                )
+
+        inferred = infer_conv_template_for_model(model, supported)
+        if inferred is None:
+            raise ValueError(
+                f"Could not infer conv_template for '{model}'. "
+                "Pass conv_template explicitly. "
+                "See GET /conv-templates for the supported list."
+            )
+
+        messages.append(
+            f"data: [INFO] Auto-selected conv_template='{inferred}' "
+            f"for model '{model}'.\n\n"
+        )
+        return inferred, messages
+
+    # Explicit template path.
+    # Warn if the template is not in the known supported list.
+    if requested_template not in supported:
+        messages.append(
+            f"data: [WARNING] conv_template='{requested_template}' was not found in the "
+            "current runtime template list. mlc-cli may warn or produce a broken chat "
+            "config.\n\n"
+        )
+        return requested_template, messages
+
+    # Template is known — optionally warn on likely mismatch.
+    inferred = infer_conv_template_for_model(model, supported)
+    if inferred is not None and inferred != requested_template:
+        messages.append(
+            f"data: [WARNING] Model '{model}' usually maps to "
+            f"conv_template='{inferred}', but request used "
+            f"'{requested_template}'. Behavior may be incorrect.\n\n"
+        )
+
+    return requested_template, messages
