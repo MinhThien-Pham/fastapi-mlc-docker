@@ -209,4 +209,127 @@ class TestBuildMlcCliCommand:
         assert all(isinstance(item, str) for item in cmd)
 
 
+# ── is_hf_model_id ────────────────────────────────────────────────────────────
 
+from app.helpers import is_hf_model_id  # noqa: E402
+
+
+class TestIsHfModelId:
+    """is_hf_model_id(model) → bool."""
+
+    # ── Accepted: real HF IDs ────────────────────────────────────────────────
+
+    def test_tinyllama_hf_id_accepted(self):
+        assert is_hf_model_id("TinyLlama/TinyLlama-1.1B-Chat-v1.0") is True
+
+    def test_meta_llama_hf_id_accepted(self):
+        assert is_hf_model_id("meta-llama/Meta-Llama-3-8B") is True
+
+    def test_org_model_hf_id_accepted(self):
+        assert is_hf_model_id("myorg/mymodel") is True
+
+    # ── Rejected: absolute paths ─────────────────────────────────────────────
+
+    def test_unix_absolute_path_rejected(self):
+        assert is_hf_model_id("/workspace/mlc-cli/models/Llama-3-8B") is False
+
+    def test_windows_drive_path_rejected(self):
+        assert is_hf_model_id("C:/models/Llama-3-8B") is False
+
+    def test_windows_drive_path_backslash_rejected(self):
+        assert is_hf_model_id("D:\\models\\Llama-3-8B") is False
+
+    # ── Rejected: well-known local-path prefixes ─────────────────────────────
+
+    def test_models_prefix_rejected(self):
+        """models/SomeModel must not be treated as HF ID even if path does not exist."""
+        assert is_hf_model_id("models/NonExistentModel") is False
+
+    def test_dist_prefix_rejected(self):
+        assert is_hf_model_id("dist/TinyLlama-1.1B-q4f16_1-MLC") is False
+
+    def test_dotslash_prefix_rejected(self):
+        assert is_hf_model_id("./local/model") is False
+
+    def test_dotdotslash_prefix_rejected(self):
+        assert is_hf_model_id("../sibling/model") is False
+
+    def test_tilde_slash_prefix_rejected(self):
+        assert is_hf_model_id("~/models/Llama") is False
+
+    # ── Rejected: no slash (bare name, not an HF ID) ─────────────────────────
+
+    def test_bare_model_name_rejected(self):
+        assert is_hf_model_id("TinyLlama") is False
+
+    def test_empty_string_rejected(self):
+        assert is_hf_model_id("") is False
+
+    # ── Rejected: existing local path ────────────────────────────────────────
+
+    def test_existing_local_path_rejected(self, tmp_path):
+        """A path that actually exists on disk is a local path, not an HF ID."""
+        existing = tmp_path / "myorg" / "mymodel"
+        existing.mkdir(parents=True)
+        # Pass the string form — is_hf_model_id should detect Path.exists()
+        result = is_hf_model_id(str(existing))
+        assert result is False
+
+
+# ── resolve_quantized_model_dir ───────────────────────────────────────────────
+
+from app.helpers import resolve_quantized_model_dir  # noqa: E402
+
+
+class TestResolveQuantizedModelDir:
+    """resolve_quantized_model_dir(mlc_cli_path, model, quant) → Path | 'none' | 'multiple'."""
+
+    def _make_artifact(self, base: "Path", name: str) -> "Path":
+        artifact = base / "dist" / name
+        artifact.mkdir(parents=True)
+        (artifact / "mlc-chat-config.json").write_text("{}")
+        return artifact
+
+    def test_exact_absolute_path_returned(self, tmp_path):
+        artifact = self._make_artifact(tmp_path, "TinyLlama-1.1B-q4f16_1-MLC")
+        result = resolve_quantized_model_dir(tmp_path, str(artifact), "q4f16_1")
+        assert result == artifact
+
+    def test_exact_relative_path_resolved(self, tmp_path):
+        self._make_artifact(tmp_path, "TinyLlama-1.1B-q4f16_1-MLC")
+        result = resolve_quantized_model_dir(tmp_path, "dist/TinyLlama-1.1B-q4f16_1-MLC", "q4f16_1")
+        assert isinstance(result, type(tmp_path))
+        assert result.name == "TinyLlama-1.1B-q4f16_1-MLC"
+
+    def test_short_model_name_resolved(self, tmp_path):
+        self._make_artifact(tmp_path, "TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC")
+        result = resolve_quantized_model_dir(tmp_path, "TinyLlama-1.1B-Chat-v1.0", "q4f16_1")
+        assert isinstance(result, type(tmp_path))
+
+    def test_hf_id_uses_basename_for_search(self, tmp_path):
+        self._make_artifact(tmp_path, "TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC")
+        result = resolve_quantized_model_dir(tmp_path, "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "q4f16_1")
+        assert isinstance(result, type(tmp_path))
+
+    def test_no_match_returns_none_sentinel(self, tmp_path):
+        (tmp_path / "dist").mkdir()
+        result = resolve_quantized_model_dir(tmp_path, "NonExistentModel", "q4f16_1")
+        assert result == "none"
+
+    def test_no_dist_dir_returns_none_sentinel(self, tmp_path):
+        result = resolve_quantized_model_dir(tmp_path, "NonExistentModel", "q4f16_1")
+        assert result == "none"
+
+    def test_multiple_matches_returns_multiple_sentinel(self, tmp_path):
+        self._make_artifact(tmp_path, "TinyLlama-1.1B-Chat-q4f16_1-MLC")
+        self._make_artifact(tmp_path, "TinyLlama-1.1B-Chat-py313-q4f16_1-MLC")
+        result = resolve_quantized_model_dir(tmp_path, "TinyLlama", "q4f16_1")
+        assert result == "multiple"
+
+    def test_dir_without_config_not_matched(self, tmp_path):
+        """Directories that look like artifact dirs but lack mlc-chat-config.json are ignored."""
+        fake = tmp_path / "dist" / "TinyLlama-1.1B-q4f16_1-MLC"
+        fake.mkdir(parents=True)
+        # Do NOT write mlc-chat-config.json
+        result = resolve_quantized_model_dir(tmp_path, "TinyLlama", "q4f16_1")
+        assert result == "none"

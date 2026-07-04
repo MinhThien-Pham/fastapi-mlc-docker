@@ -8,13 +8,20 @@ All functions here are side-effect-free or have their side effects
 
 Functions
 ---------
-detect_known_failure         – detect known build-log failure signatures
-run_tool_check               – thin wrapper around subprocess for tool availability
-build_mlc_cli_command        – construct ``go run . build`` argv list
-build_convert_command        – construct ``go run . quantize`` argv list
-get_supported_conv_templates – load the CONV_TEMPLATES set from pinned mlc-llm source
-infer_conv_template_for_model – heuristic model-name → template name mapping
+detect_known_failure              – detect known build-log failure signatures
+run_tool_check                    – thin wrapper around subprocess for tool availability
+build_mlc_cli_command             – construct ``go run . build`` argv list
+build_quantize_command            – construct ``go run . quantize`` argv list
+build_compile_command             – construct ``go run . compile`` argv list
+build_run_command                 – construct ``go run . run`` argv list
+resolve_model_lib                 – locate a compiled .so/.dylib for ``/run``
+is_hf_model_id                    – detect Hugging Face hub identifiers for ``/quantize``
+resolve_quantized_model_dir       – find a quantized artifact dir in dist/ for ``/compile``
+resolve_chat_artifacts            – resolve model + model_lib shorthand for ``/chat/load``
+get_supported_conv_templates      – load the CONV_TEMPLATES set from pinned mlc-llm source
+infer_conv_template_for_model     – heuristic model-name → template name mapping
 prepare_conv_template_for_quantize – resolve + warn before /quantize calls mlc-cli
+discover_artifacts                – scan workspace for wheels, model dirs, compiled libs
 """
 
 from __future__ import annotations
@@ -25,6 +32,143 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
+
+
+# ── Hugging Face model ID detection ──────────────────────────────────────────
+
+# Prefixes that unambiguously indicate a local filesystem path, not an HF ID.
+# A string starting with any of these should never be passed to HF Hub.
+_LOCAL_PATH_PREFIXES: tuple[str, ...] = (
+    "models/",
+    "dist/",
+    "./",
+    "../",
+    "~/",
+    "~\\",
+)
+
+
+def is_hf_model_id(model: str) -> bool:
+    """Return True if *model* looks like a Hugging Face hub identifier.
+
+    A Hugging Face ID has the form ``Owner/ModelName``.  This function
+    returns False for anything that looks like a local filesystem path
+    so that relative paths such as ``models/Llama-3-8B`` are never
+    accidentally forwarded to the HF Hub.
+
+    Rejected (returns False):
+    - Empty string
+    - Absolute paths  (starts with ``/`` or a Windows drive letter like ``C:``)
+    - Well-known local-path prefixes: ``models/``, ``dist/``, ``./``, ``../``,
+      ``~/``, ``~\\``
+    - Strings that already exist as a local filesystem path
+    - Strings with no ``/`` at all (bare model name without owner)
+
+    Accepted (returns True):
+    - ``Owner/ModelName`` patterns that do NOT match any of the above
+
+    Examples
+    --------
+    >>> is_hf_model_id("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    True
+    >>> is_hf_model_id("meta-llama/Meta-Llama-3-8B")
+    True
+    >>> is_hf_model_id("/workspace/mlc-cli/models/Llama-3-8B")
+    False
+    >>> is_hf_model_id("models/Llama-3-8B")
+    False
+    >>> is_hf_model_id("dist/TinyLlama-1.1B-q4f16_1-MLC")
+    False
+    >>> is_hf_model_id("./local/path")
+    False
+    >>> is_hf_model_id("C:/models/Llama")
+    False
+    """
+    if not model:
+        return False
+    # Absolute paths: Unix root or Windows drive (e.g. "C:")
+    if model.startswith("/") or (len(model) > 1 and model[1] == ":"):
+        return False
+    # Well-known local-path prefixes
+    if model.startswith(_LOCAL_PATH_PREFIXES):
+        return False
+    # Must contain at least one slash (Owner/ModelName)
+    if "/" not in model:
+        return False
+    # Already exists as a local path
+    if Path(model).exists():
+        return False
+    # Looks like an HF hub identifier
+    return True
+
+
+# ── Quantized artifact resolution (for /compile) ──────────────────────────────
+
+def resolve_quantized_model_dir(
+    mlc_cli_path: Path,
+    model: str,
+    quant: str,
+) -> "Path | Literal['none'] | Literal['multiple']":
+    """Resolve *model* to a quantized artifact directory inside ``dist/``.
+
+    Accepts four forms of *model*:
+
+    1. **Exact existing path** — an absolute path or a relative path that
+       exists under *mlc_cli_path*.  Returned unchanged (as a ``Path``).
+    2. **Artifact folder name** — the literal name of a directory under
+       ``dist/`` (e.g. ``TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC``).
+    3. **Short model name** — the base part of the model name, used to
+       search ``dist/`` for ``*<stem>*<quant>*MLC`` directories.
+    4. **Hugging Face hub ID** — ``Owner/ModelName``.  The basename after
+       the last ``/`` is used as the search stem.
+
+    Returns
+    -------
+    Path
+        Resolved absolute path to the single matching artifact directory.
+    ``"none"``
+        Sentinel: no matching artifact found — caller should tell the user
+        to run ``/quantize`` first.
+    ``"multiple"``
+        Sentinel: more than one candidate matches — caller should tell the
+        user to pass an exact artifact path from ``GET /artifacts``.
+    """
+    # ── Case 1: exact path that already exists ───────────────────────────────
+    p = Path(model)
+    if p.is_absolute() and p.is_dir():
+        return p
+    if not p.is_absolute():
+        candidate = (mlc_cli_path / p).resolve()
+        if candidate.is_dir():
+            return candidate
+
+    # ── Derive stem for fuzzy search ──────────────────────────────────────
+    # For HF IDs like "Owner/ModelName" use the basename; otherwise use model as-is.
+    stem = model.split("/")[-1] if "/" in model else model
+
+    # ── Case 2/3/4: scan dist/ for matching quantized dirs ──────────────────
+    dist_dir = mlc_cli_path / "dist"
+    if not dist_dir.is_dir():
+        return "none"
+
+    stem_lower = stem.lower()
+    quant_lower = quant.lower()
+    matches: list[Path] = []
+    for entry in dist_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        name_lower = entry.name.lower()
+        # Must contain the stem, the quant string, and end with "-mlc"
+        if stem_lower in name_lower and quant_lower in name_lower and name_lower.endswith("-mlc"):
+            # Confirm it is a real quantized artifact (has mlc-chat-config.json)
+            if (entry / "mlc-chat-config.json").exists():
+                matches.append(entry)
+
+    if len(matches) == 0:
+        return "none"
+    if len(matches) > 1:
+        return "multiple"
+    return matches[0]
 
 
 # ── Known build-failure signatures ────────────────────────────────────────────

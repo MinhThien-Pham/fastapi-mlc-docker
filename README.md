@@ -185,18 +185,33 @@ curl -s http://localhost:8000/artifacts | python3 -m json.tool
 
 **If you have model weights and need to prepare them (once per model):**
 
+Use the **same Hugging Face model ID** for all three steps — no path copying needed:
+
 ```bash
-# Quantize from Hugging Face → dist/<ModelName>-<quant>-MLC/
-# conv_template defaults to "auto" — the API infers it from the model name.
+# Step 1 — quantize weights from the HF Hub (conv_template auto-inferred)
+# Passes the Hugging Face ID or local path to mlc-cli quantize.
+# Output: dist/<ModelName>-<python>-<quant>-MLC/
 curl -N -X POST http://localhost:8000/quantize \
   -H 'Content-Type: application/json' \
   -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
 
-# Compile the model library → dist/libs/<ModelName>-<quant>-cuda.so
+# Step 2 — compile the quantized artifact
+# Resolves the model selector to an existing quantized artifact, then calls mlc-cli compile.
+# Output: dist/libs/<resolved-artifact>-<quant>-cuda.so
 curl -N -X POST http://localhost:8000/compile \
   -H 'Content-Type: application/json' \
-  -d '{"model": "dist/<ModelName>-q4f16_1-MLC", "quant": "q4f16_1"}'
+  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
+
+# Step 3 — load for chat
+# Resolves the model directory and compiled library, then loads them into the chat engine.
+curl -X POST http://localhost:8000/chat/load \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
 ```
+
+> **Advanced:** Pass exact artifact paths to `model` if you have multiple quant
+> variants or need deterministic artifact pinning.  Use `GET /artifacts` to list
+> available artifacts and copy the exact `path` value.
 
 **Load a compiled model, chat, then unload:**
 
@@ -204,9 +219,7 @@ curl -N -X POST http://localhost:8000/compile \
 # Load
 curl -X POST http://localhost:8000/chat/load \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "TinyLlama-1.1B-Chat-v1.0"
-  }'
+  -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
 
 # Chat
 curl -X POST http://localhost:8000/chat/completions \
@@ -230,7 +243,7 @@ See [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md) for all request fields, full 
 curl -X POST http://localhost:8000/chat/load \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "TinyLlama-1.1B-Chat-v1.0"
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
   }'
 
 # Chat

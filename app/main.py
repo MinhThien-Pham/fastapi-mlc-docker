@@ -21,7 +21,9 @@ from app.helpers import (
     detect_known_failure,
     discover_artifacts,
     get_supported_conv_templates,
+    is_hf_model_id,
     prepare_conv_template_for_quantize,
+    resolve_quantized_model_dir,
     run_tool_check,
     resolve_chat_artifacts,
 )
@@ -686,29 +688,39 @@ async def quantize_model(req: QuantizeRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # ── Normalize model path: resolve relative paths against known roots ─────
-    model_path = Path(req.model)
-    if not model_path.is_absolute():
-        candidate = (MLC_CLI_PATH / model_path).resolve()
-        if candidate.exists():
-            model_path = candidate
-        else:
-            model_path = (Path.cwd() / model_path).resolve()
-    resolved_model = model_path.resolve()
+    # ── Normalize model: HF IDs pass through; local paths are resolved ─────────
+    if is_hf_model_id(req.model):
+        # Hugging Face hub identifier — mlc-cli will download the model.
+        # No local path resolution needed; pass the ID through unchanged.
+        resolved_req = req.model_copy(update={"conv_template": resolved_template})
+    else:
+        model_path = Path(req.model)
+        if not model_path.is_absolute():
+            candidate = (MLC_CLI_PATH / model_path).resolve()
+            if candidate.exists():
+                model_path = candidate
+            else:
+                model_path = (Path.cwd() / model_path).resolve()
+        resolved_model = model_path.resolve()
 
-    if not resolved_model.exists():
-        original = req.model
-        async def model_error_stream():
-            yield (
-                f"data: [ERROR] model path not found.\n\n"
-                f"data:   original:  {original}\n\n"
-                f"data:   resolved:  {resolved_model}\n\n"
-            )
-        return StreamingResponse(model_error_stream(), media_type="text/event-stream")
+        if not resolved_model.exists():
+            original = req.model
+            async def model_error_stream():
+                yield (
+                    f"data: [ERROR] model path not found.\n\n"
+                    f"data:   original:  {original}\n\n"
+                    f"data:   resolved:  {resolved_model}\n\n"
+                    f"data:   Tip: for models on Hugging Face Hub, pass the model ID "
+                    f"(e.g. \"Owner/ModelName\") to have mlc-cli download weights automatically.\n\n"
+                )
+            return StreamingResponse(model_error_stream(), media_type="text/event-stream")
 
-    req = req.model_copy(update={"model": str(resolved_model), "conv_template": resolved_template})
+        resolved_req = req.model_copy(update={
+            "model": str(resolved_model),
+            "conv_template": resolved_template,
+        })
 
-    cmd = build_quantize_command(req)
+    cmd = build_quantize_command(resolved_req)
 
     async def _quantize_stream():
         # Emit conv_template info/warnings before mlc-cli output.
@@ -759,13 +771,33 @@ async def compile_model(req: CompileRequest):
     """Compile model library and stream output as SSE.
 
     Internally this calls the mlc-cli ``compile`` sub-command.
-    The ``model`` field is required.  All other fields have sensible defaults.
 
-    Example — compile a locally-cloned Llama-3 8B model::
+    The ``model`` field accepts any of the following forms:
+
+    * **Hugging Face model ID** (recommended) — e.g.
+      ``TinyLlama/TinyLlama-1.1B-Chat-v1.0``.  The basename after ``/`` is
+      used to search ``dist/`` for the matching quantized artifact directory.
+    * **Short model name** — e.g. ``TinyLlama-1.1B-Chat-v1.0``.
+    * **Artifact folder name** — the exact name of a directory under ``dist/``
+      (e.g. ``TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC``).
+    * **Exact artifact path** (advanced) — an absolute path or a path
+      relative to the mlc-cli workspace.
+
+    The ``quant`` field (default ``q4f16_1``) disambiguates when multiple
+    quantized artifacts exist for the same model name.  Use ``GET /artifacts``
+    to list all available artifacts if resolution is ambiguous.
+
+    Example — compile using an HF model ID (beginner flow)::
 
         curl -N -X POST http://localhost:8000/compile \\
              -H 'Content-Type: application/json' \\
-             -d '{"model": "models/Llama-3-8B", "quant": "q4f16_1", "device": "cuda"}'
+             -d '{"model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"}'
+
+    Example — compile using an exact artifact path (advanced)::
+
+        curl -N -X POST http://localhost:8000/compile \\
+             -H 'Content-Type: application/json' \\
+             -d '{"model": "dist/TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC"}'
 
     Each SSE line is prefixed with ``data: ``.
     The stream ends with ``data: [DONE]`` on success or ``data: [ERROR] ...``
@@ -776,28 +808,36 @@ async def compile_model(req: CompileRequest):
             yield "data: [ERROR] mlc-cli workspace not found. The Docker image should bake mlc-cli and the entrypoint should sync it into /workspace/mlc-cli. Check /repo-status and rebuild the image if needed.\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    # ── Normalize model path: resolve relative paths against known roots ─────
-    model_path = Path(req.model)
-    if not model_path.is_absolute():
-        candidate = (MLC_CLI_PATH / model_path).resolve()
-        if candidate.exists():
-            model_path = candidate
-        else:
-            model_path = (Path.cwd() / model_path).resolve()
-    resolved_model = model_path.resolve()
+    # ── Resolve model: accept HF ID, short name, artifact folder, or exact path ─
+    resolution = resolve_quantized_model_dir(MLC_CLI_PATH, req.model, req.quant)
 
-    if not resolved_model.exists():
+    if resolution == "none":
         original = req.model
-        async def model_error_stream():
+        quant = req.quant
+        async def no_artifact_stream():
             yield (
-                f"data: [ERROR] model path not found.\n\n"
-                f"data:   original:  {original}\n\n"
-                f"data:   resolved:  {resolved_model}\n\n"
+                f"data: [ERROR] No quantized artifact found for model '{original}' "
+                f"with quant '{quant}'.\n\n"
+                f"data:   Run POST /quantize first to generate the artifact, "
+                f"then retry POST /compile.\n\n"
+                f"data:   Use GET /artifacts to list all available artifacts.\n\n"
             )
-        return StreamingResponse(model_error_stream(), media_type="text/event-stream")
+        return StreamingResponse(no_artifact_stream(), media_type="text/event-stream")
 
-    req = req.model_copy(update={"model": str(resolved_model)})
+    if resolution == "multiple":
+        original = req.model
+        quant = req.quant
+        async def multiple_artifacts_stream():
+            yield (
+                f"data: [ERROR] Multiple quantized artifacts match model '{original}' "
+                f"with quant '{quant}'.\n\n"
+                f"data:   Use GET /artifacts to list candidates, then pass an exact "
+                f"artifact path in the 'model' field.\n\n"
+            )
+        return StreamingResponse(multiple_artifacts_stream(), media_type="text/event-stream")
 
+    # Single match or exact path — proceed with compilation
+    req = req.model_copy(update={"model": str(resolution)})
     cmd = build_compile_command(req)
 
     return StreamingResponse(

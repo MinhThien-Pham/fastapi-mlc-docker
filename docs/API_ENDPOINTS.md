@@ -277,11 +277,11 @@ Internally runs two steps:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `model` | string | **required** | Hugging Face model ID (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`) or local path (e.g. `models/Llama-3-8B`) |
+| `model` | string | **required** | Hugging Face model ID (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`) or local path (e.g. `models/Llama-3-8B`). HF IDs are passed through to `mlc-cli`; local paths are resolved by the FastAPI wrapper. |
 | `quant` | string | `"q4f16_1"` | Quantization format |
 | `device` | string | `"cuda"` | Target device |
 | `conv_template` | string | `"auto"` | Conversation template — tells MLC how to format chat prompts for the model. See below. |
-| `output` | string | `""` | Output path. If omitted, defaults to `dist/<model_basename>-<quant>-MLC` |
+| `output` | string | `""` | Output path. If omitted, `/quantize` produces a quantized artifact directory under `dist/` (e.g., `dist/<ModelName>-<python>-<quant>-MLC/`). |
 
 **`conv_template` behavior:**
 
@@ -403,7 +403,7 @@ Compiles the model library (`.so` file) from quantized model weights. Streams ou
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `model` | string | **required** | Path to quantized model directory (e.g. `dist/TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC`) |
+| `model` | string | **required** | Model selector. Accepted forms: Hugging Face model ID (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`), short model name, artifact folder name, or exact `dist/...-MLC` path. |
 | `quant` | string | `"q4f16_1"` | Must match the quant used during `/quantize` |
 | `device` | string | `"cuda"` | Target device |
 | `output` | string | `""` | Output path for the compiled `.so`. Defaults to `dist/libs/<model>-<quant>-<device>.so` |
@@ -414,7 +414,7 @@ Compiles the model library (`.so` file) from quantized model weights. Streams ou
 curl -N -X POST http://localhost:8000/compile \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "dist/TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC",
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "quant": "q4f16_1",
     "device": "cuda"
   }'
@@ -425,9 +425,17 @@ curl -N -X POST http://localhost:8000/compile \
 ```
 data: [mlc-cli] Compiling model library...
 data: Compiling: 100%|██████████| 201/201 [05:30<00:00]
-data: Library written to dist/libs/TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC-q4f16_1-cuda.so
+data: Library written to dist/libs/TinyLlama-1.1B-Chat-v1.0-py313-q4f16_1-MLC-q4f16_1-cuda.so
 data: [DONE]
 ```
+
+**Notes:**
+- **`/compile` does not download or quantize the model.**
+- When a Hugging Face model ID (or other selector) is provided, it is used only as a selector to find an existing quantized artifact under `dist/`.
+- The API resolves the selector to a quantized artifact directory, then calls `mlc-cli compile`.
+- If no matching quantized artifact is found, you must run `/quantize` first.
+- If multiple artifacts match (e.g., multiple quants of the same model), use the exact path from `/artifacts` to disambiguate.
+- `/compile` produces a compiled library under `dist/libs/`. (e.g., `dist/libs/<resolved-artifact>-<quant>-cuda.so` or a similar pattern depending on your OS/device).
 
 ---
 
@@ -508,11 +516,21 @@ Loads a compiled model into GPU memory. Must be called before `/chat/completions
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `model` | string | **required** | Path to quantized model directory. Accepts workspace-relative paths |
-| `model_lib` | string | **required** | Path to compiled `.so` library. Accepts workspace-relative paths |
+| `model` | string | **required** | Model selector. Accepted forms: Hugging Face model ID (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`), short model name, artifact folder name, or exact `dist/...-MLC` path. |
+| `model_lib` | string | `""` | Optional for exact control. Path to compiled `.so` library. If omitted, the API will auto-resolve it. |
 | `device` | string | `"cuda:0"` | Target device |
 
-**Example (workspace-relative paths):**
+**Example (beginner flow):**
+
+```bash
+curl -X POST http://localhost:8000/chat/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  }'
+```
+
+**Advanced Example (exact workspace-relative paths):**
 
 ```bash
 curl -X POST http://localhost:8000/chat/load \
@@ -543,8 +561,11 @@ curl -X POST http://localhost:8000/chat/load \
 | `500` | Engine initialization failed |
 
 **Notes:**
+- `model_lib` is optional for beginner usage because the API can auto-resolve it.
+- The API resolves the model directory and compiled library when there is one clear match based on the `model` selector.
+- If no compiled library exists, you must run `/compile` first.
+- If multiple matches exist, you should inspect `/artifacts` and pass exact paths for `model` and/or `model_lib`.
 - Both `model` and `model_lib` accept workspace-relative paths (relative to `/workspace/mlc-cli`).
-  Replace the above example paths with the actual paths from your `/artifacts` output.
 - Only one model can be loaded at a time. To switch models, call `/chat/unload` first.
 
 ---

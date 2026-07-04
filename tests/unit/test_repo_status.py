@@ -29,9 +29,9 @@ def test_repo_status_reports_baked_and_workspace_state(client, monkeypatch, tmp_
         return None
 
     def fake_read_text_file(path: Path):
-        if str(path) == "/opt/mlc-cli-ref.txt":
+        if path == Path("/opt/mlc-cli-ref.txt"):
             return "sha-baked"
-        if str(path) == "/opt/mlc-cli-repo.txt":
+        if path == Path("/opt/mlc-cli-repo.txt"):
             return "https://github.com/MinhThien-Pham/mlc-cli.git"
         return None
 

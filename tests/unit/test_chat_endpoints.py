@@ -60,7 +60,10 @@ def test_load_success(client, mock_mlc_llm):
     status_resp = client.get("/chat/status")
     assert status_resp.status_code == 200
     assert status_resp.json()["loaded"] is True
-    assert status_resp.json()["model"] == "/valid/model/dir"
+
+    from pathlib import Path
+    expected_model = str(Path("/valid/model/dir"))
+    assert status_resp.json()["model"] == expected_model
 
 def test_load_relative_paths_resolved(client, mock_mlc_llm):
     response = client.post("/chat/load", json={

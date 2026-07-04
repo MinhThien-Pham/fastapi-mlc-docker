@@ -599,3 +599,105 @@ class TestConvTemplatesEndpoint:
         assert "tinyllama_v1_0" in templates
         assert "deepseek_v3" in templates
         assert "llama-3" in templates
+
+
+# ── /quantize with Hugging Face model IDs ────────────────────────────────────
+
+class TestQuantizeWithHfModelId:
+    """HF model IDs should pass through /quantize unchanged and never trigger
+    the local-path-not-found error.  Local-looking paths should NOT be treated
+    as HF IDs even when the path does not yet exist on disk.
+    """
+
+    def _fake_stream(self, lines: list[str]):
+        async def _gen(*_args, **_kwargs):
+            for line in lines:
+                yield line
+        return _gen
+
+    def _make_repo(self, tmp_path, templates: set[str] | None = None):
+        fake_repo = tmp_path / "mlc-cli"
+        fake_repo.mkdir()
+        gen_cfg_dir = fake_repo / "mlc-llm" / "python" / "mlc_llm" / "interface"
+        gen_cfg_dir.mkdir(parents=True)
+        t = templates if templates is not None else {"tinyllama_v1_0", "llama-3", "chatml"}
+        lines = "CONV_TEMPLATES = {\n" + "".join(f'    "{x}",\n' for x in sorted(t)) + "}\n"
+        (gen_cfg_dir / "gen_config.py").write_text(lines)
+        return fake_repo
+
+    def test_hf_model_id_does_not_stream_path_error(self, client, monkeypatch, tmp_path):
+        """HF ID must not trigger the 'model path not found' SSE error."""
+        fake_repo = self._make_repo(tmp_path)
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+        monkeypatch.setattr("app.main.stream_subprocess", self._fake_stream(["data: [DONE]\n\n"]))
+
+        resp = client.post("/quantize", json={
+            "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "conv_template": "tinyllama_v1_0",  # explicit to skip auto-inference
+        })
+        assert resp.status_code == 200
+        assert "[ERROR] model path not found" not in resp.text
+        assert "[DONE]" in resp.text
+
+    def test_hf_model_id_reaches_mlc_cli_unchanged(self, client, monkeypatch, tmp_path):
+        """The HF ID must be forwarded to mlc-cli --model unchanged (no path mangling)."""
+        fake_repo = self._make_repo(tmp_path)
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+
+        captured: list[list[str]] = []
+
+        async def fake_stream(cmd, *args, **kwargs):
+            captured.append(cmd)
+            yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr("app.main.stream_subprocess", fake_stream)
+
+        resp = client.post("/quantize", json={
+            "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "conv_template": "tinyllama_v1_0",
+        })
+        assert resp.status_code == 200
+        assert captured, "stream_subprocess was never called"
+        cmd = captured[0]
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    def test_local_looking_path_not_treated_as_hf_id(self, client, monkeypatch, tmp_path):
+        """models/SomeModel must NOT be treated as an HF ID — it must trigger path-not-found."""
+        fake_repo = self._make_repo(tmp_path)
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+        monkeypatch.setattr("app.main.stream_subprocess", self._fake_stream(["data: [DONE]\n\n"]))
+
+        resp = client.post("/quantize", json={
+            "model": "models/NonExistentModel",
+            "conv_template": "llama-3",  # explicit to skip auto-inference
+        })
+        assert resp.status_code == 200
+        assert "[ERROR] model path not found" in resp.text
+
+    def test_dist_prefix_not_treated_as_hf_id(self, client, monkeypatch, tmp_path):
+        """dist/SomeArtifact-MLC must NOT be treated as an HF ID."""
+        fake_repo = self._make_repo(tmp_path)
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+        monkeypatch.setattr("app.main.stream_subprocess", self._fake_stream(["data: [DONE]\n\n"]))
+
+        resp = client.post("/quantize", json={
+            "model": "dist/NonExistentArtifact-MLC",
+            "conv_template": "llama-3",
+        })
+        assert resp.status_code == 200
+        assert "[ERROR] model path not found" in resp.text
+
+    def test_error_message_includes_hf_tip(self, client, monkeypatch, tmp_path):
+        """When a local path is not found, the error should hint about HF IDs."""
+        fake_repo = self._make_repo(tmp_path)
+        monkeypatch.setattr("app.main.MLC_CLI_PATH", fake_repo)
+        monkeypatch.setattr("app.main.stream_subprocess", self._fake_stream(["data: [DONE]\n\n"]))
+
+        resp = client.post("/quantize", json={
+            "model": "models/NonExistentModel",
+            "conv_template": "llama-3",
+        })
+        assert resp.status_code == 200
+        # The error stream must contain a helpful tip pointing to HF Hub
+        assert "Hugging Face" in resp.text or "Owner/ModelName" in resp.text
