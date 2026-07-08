@@ -1,5 +1,3 @@
-import json
-import pytest
 import os
 from scripts import benchmark_edge
 
