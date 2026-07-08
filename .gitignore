@@ -40,3 +40,6 @@ logs/*
 
 # Candidate verification local state
 .mlc-cli-verify/
+
+# Benchmarks
+benchmarks/
