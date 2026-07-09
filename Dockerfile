@@ -14,9 +14,6 @@ ENV GOTOOLCHAIN=local
 # Runtime environment variables for baked mlc-cli workspace
 ENV MLC_CLI_PATH=/workspace/mlc-cli
 ENV BAKED_MLC_CLI_PATH=/opt/mlc-cli
-ENV TVM_HOME=/workspace/mlc-cli/tvm
-ENV PYTHONPATH=/workspace/mlc-cli/tvm/python
-ENV LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib
 
 # conda first so conda-managed python/cmake/rust take precedence
 ENV PATH="${CONDA_DIR}/bin:/usr/local/go/bin:${PATH}"

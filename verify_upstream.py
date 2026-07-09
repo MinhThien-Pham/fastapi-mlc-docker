@@ -20,7 +20,7 @@ from app.helpers import try_restore_metadata
 
 METADATA = Path(".upstream-sha.json")
 RECOVERY_MARKER = Path(".upstream-verify-recovery.json")
-REPO_URL = "https://github.com/ballinyouup/mlc-cli.git"
+REPO_URL = "https://github.com/MinhThien-Pham/mlc-cli.git"
 API_URL = "http://localhost:8000"
 SMOKE = "tests/integration/test_smoke.py"
 FULL = "tests/integration/test_full_pipeline.py"

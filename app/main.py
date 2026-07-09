@@ -54,6 +54,25 @@ app = FastAPI(title="FastAPI MLC-CLI", lifespan=lifespan)
 MLC_CLI_PATH = Path(os.getenv("MLC_CLI_PATH", "/workspace/mlc-cli"))
 BAKED_MLC_CLI_PATH = Path(os.getenv("BAKED_MLC_CLI_PATH", "/opt/mlc-cli"))
 
+def get_effective_tvm_paths() -> dict:
+    tvm_source = os.getenv("TVM_SOURCE", "bundled")
+    mlc_cli_path = Path(os.getenv("MLC_CLI_PATH", str(MLC_CLI_PATH)))
+
+    bundled_tvm_path = mlc_cli_path / "mlc-llm" / "3rdparty" / "tvm"
+    standalone_tvm_path = mlc_cli_path / "tvm"
+
+    effective_tvm_path = (
+        bundled_tvm_path
+        if tvm_source == "bundled"
+        else standalone_tvm_path
+    )
+
+    return {
+        "tvm_source": tvm_source,
+        "effective_tvm_path": effective_tvm_path,
+        "bundled_tvm_path": bundled_tvm_path,
+        "standalone_tvm_path": standalone_tvm_path,
+    }
 
 # ── Internal subprocess helpers ───────────────────────────────────────────────
 
@@ -549,6 +568,8 @@ def setup_check():
             "Make sure CUDA drivers are installed and the GPU is visible to the container."
         )
 
+    tvm_paths = get_effective_tvm_paths()
+
     return {
         "repo_exists": repo_exists,
         "status":   overall,
@@ -566,12 +587,16 @@ def setup_check():
             "python_match": py_match,
             "mlc_llm_importable": mlc_import,
             "tvm_importable": tvm_import,
+            "effective_tvm_source": tvm_paths["tvm_source"],
+            "effective_tvm_path": str(tvm_paths["effective_tvm_path"]),
             "artifact_dirs_present": {
                 "models": (MLC_CLI_PATH / "models").exists(),
                 "dist": (MLC_CLI_PATH / "dist").exists(),
                 "wheels": (MLC_CLI_PATH / "wheels").exists(),
                 "mlc-llm": (MLC_CLI_PATH / "mlc-llm").exists(),
-                "tvm": (MLC_CLI_PATH / "tvm").exists(),
+                "tvm": tvm_paths["effective_tvm_path"].exists(),
+                "bundled_tvm": tvm_paths["bundled_tvm_path"].exists(),
+                "standalone_tvm": tvm_paths["standalone_tvm_path"].exists(),
             }
         }
     }
@@ -587,6 +612,8 @@ def repo_status():
     if baked_head and workspace_head:
         matches = baked_head == workspace_head
 
+    tvm_paths = get_effective_tvm_paths()
+
     return {
         "source_management": "baked-image",
         "mlc_cli_path": str(MLC_CLI_PATH),
@@ -596,12 +623,16 @@ def repo_status():
         "baked_actual_head": baked_head,
         "workspace_head": workspace_head,
         "workspace_matches_baked": matches,
+        "effective_tvm_source": tvm_paths["tvm_source"],
+        "effective_tvm_path": str(tvm_paths["effective_tvm_path"]),
         "artifact_dirs": {
             "models": (MLC_CLI_PATH / "models").exists(),
             "dist": (MLC_CLI_PATH / "dist").exists(),
             "wheels": (MLC_CLI_PATH / "wheels").exists(),
             "mlc-llm": (MLC_CLI_PATH / "mlc-llm").exists(),
-            "tvm": (MLC_CLI_PATH / "tvm").exists(),
+            "tvm": tvm_paths["effective_tvm_path"].exists(),
+            "bundled_tvm": tvm_paths["bundled_tvm_path"].exists(),
+            "standalone_tvm": tvm_paths["standalone_tvm_path"].exists(),
         },
         "dev_mode": False
     }

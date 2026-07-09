@@ -275,9 +275,7 @@ def start_candidate_container(names: dict[str, str], port: int) -> None:
         "-v", f"{volume}:/workspace",
         "-e", "MLC_CLI_PATH=/workspace/mlc-cli",
         "-e", "BAKED_MLC_CLI_PATH=/opt/mlc-cli",
-        "-e", "TVM_HOME=/workspace/mlc-cli/tvm",
-        "-e", "PYTHONPATH=/workspace/mlc-cli/tvm/python",
-        "-e", "LD_LIBRARY_PATH=/workspace/mlc-cli/tvm/build/lib:/workspace/mlc-cli/mlc-llm/build/lib",
+        "-e", "TVM_SOURCE=bundled",
         image,
     ])
     print(f"  Candidate container started (detached).")
